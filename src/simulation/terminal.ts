@@ -161,6 +161,37 @@ export function makePacketsWithArp(
   ]
 }
 
+/** When the last packet in an animation finishes, in ms from dispatch. */
+export function finishMs(packets: PacketAnim[]): number {
+  return packets.reduce((end, p) => Math.max(end, p.delayMs + p.durationMs), 0)
+}
+
+/** Shift an animation so it starts `ms` later — used to hold data packets until DNS has answered. */
+export function startAfter(packets: PacketAnim[], ms: number): PacketAnim[] {
+  return ms ? packets.map((p) => ({ ...p, delayMs: p.delayMs + ms })) : packets
+}
+
+/** One leg of a multi-step exchange (e.g. DHCP), outbound along `path` or back along it. */
+function leg(
+  path: string[],
+  edges: NetEdge[],
+  protocol: PacketAnim['protocol'],
+  label: string,
+  startMs: number,
+  back = false,
+): PacketAnim[] {
+  const segments = segmentsOnPath(path, edges)
+  const ordered = back ? [...segments].reverse() : segments
+  const batchId = `${Date.now()}-${++packetSequence}`
+  return ordered.map(({ edgeId, reverse }, i) => ({
+    id: `pkt-${batchId}-${i}`,
+    edgeId, protocol, label,
+    delayMs: startMs + i * HOP_MS,
+    durationMs: HOP_MS,
+    reverse: back ? !reverse : reverse,
+  }))
+}
+
 type Lines = TerminalLine[]
 
 function out(text: string): TerminalLine { return { type: 'output', text } }
@@ -254,14 +285,18 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
       ? findPath(src.id, cloudNode.id, ctx.nodes, ctx.edges)
       : null
 
-    // Animate DNS lookup then ICMP packets to the internet
+    // Animate DNS lookup, then ICMP packets to the internet once the DNS reply is back
+    // (the client can't address a packet it hasn't resolved yet)
     const dnsNode = ctx.nodes.find((n) => n.data.deviceType === 'dns')
     const dnsPath = dnsNode ? findPath(src.id, dnsNode.id, ctx.nodes, ctx.edges) : null
+    let afterDns = 0
     if (dnsPath && dnsNode) {
-      ctx.dispatchPackets?.(makePacketsWithArp(src, dnsNode, dnsPath, ctx, 'DNS', 'DNS', true))
+      const dnsPackets = makePacketsWithArp(src, dnsNode, dnsPath, ctx, 'DNS', 'DNS', true)
+      afterDns = finishMs(dnsPackets)
+      ctx.dispatchPackets?.(dnsPackets)
     }
     if (cloudPath && cloudNode) {
-      ctx.dispatchPackets?.(makePacketsWithArp(src, cloudNode, cloudPath, ctx, 'ICMP', 'ICMP', true))
+      ctx.dispatchPackets?.(startAfter(makePacketsWithArp(src, cloudNode, cloudPath, ctx, 'ICMP', 'ICMP', true), afterDns))
     }
 
     const hops = (cloudPath?.length ?? 3) - 1
@@ -323,14 +358,17 @@ function cmdTraceroute(args: string[], ctx: TermContext): Lines {
       ? findPath(src.id, cloudNode.id, ctx.nodes, ctx.edges)
       : null
 
-    // Animate DNS lookup then ICMP probe packets towards the internet
+    // Animate DNS lookup, then ICMP probe packets towards the internet once DNS has answered
     const dnsNode = ctx.nodes.find((n) => n.data.deviceType === 'dns')
     const dnsPath = dnsNode ? findPath(src.id, dnsNode.id, ctx.nodes, ctx.edges) : null
+    let afterDns = 0
     if (dnsPath && dnsNode) {
-      ctx.dispatchPackets?.(makePacketsWithArp(src, dnsNode, dnsPath, ctx, 'DNS', 'DNS', true))
+      const dnsPackets = makePacketsWithArp(src, dnsNode, dnsPath, ctx, 'DNS', 'DNS', true)
+      afterDns = finishMs(dnsPackets)
+      ctx.dispatchPackets?.(dnsPackets)
     }
     if (cloudPath && cloudNode) {
-      ctx.dispatchPackets?.(makePacketsWithArp(src, cloudNode, cloudPath, ctx, 'ICMP', 'ICMP'))
+      ctx.dispatchPackets?.(startAfter(makePacketsWithArp(src, cloudNode, cloudPath, ctx, 'ICMP', 'ICMP'), afterDns))
     }
 
     const lines: Lines = [
@@ -594,11 +632,15 @@ function cmdCurl(args: string[], ctx: TermContext): Lines {
         (n) => n.data.deviceType === 'web' && n.data.ip === localRecord.ip,
       )
       const targetPath = targetWeb ? findPath(src.id, targetWeb.id, ctx.nodes, ctx.edges) : null
+      // DNS query and answer first, then the HTTP request to the address it returned
+      let afterDns = 0
       if (dnsPath && dnsNode) {
-        ctx.dispatchPackets?.(makePacketsWithArp(src, dnsNode, dnsPath, ctx, 'DNS', 'DNS', false))
+        const dnsPackets = makePacketsWithArp(src, dnsNode, dnsPath, ctx, 'DNS', 'DNS', true)
+        afterDns = finishMs(dnsPackets)
+        ctx.dispatchPackets?.(dnsPackets)
       }
       if (targetPath && targetWeb) {
-        ctx.dispatchPackets?.(makePacketsWithArp(src, targetWeb, targetPath, ctx, 'HTTP', 'HTTP', true))
+        ctx.dispatchPackets?.(startAfter(makePacketsWithArp(src, targetWeb, targetPath, ctx, 'HTTP', 'HTTP', true), afterDns))
         return renderPage(targetWeb)
       }
       return [err(`curl: (7) Failed to connect to ${hostname} (${localRecord.ip}): No route to host`)]
@@ -709,30 +751,12 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
     }
 
     // Build 4-way DHCP handshake animation: DISCOVER → OFFER → REQUEST → ACK
-    const eids = edgesOnPath(path, ctx.edges)
-    const N = eids.length
-    const ts = Date.now()
+    const legMs = (path.length - 1) * HOP_MS
     const dhcpPackets: PacketAnim[] = [
-      // DISCOVER (client → router)
-      ...eids.map((edgeId, i) => ({
-        id: `pkt-${ts}-d${i}`, edgeId, protocol: 'UDP' as const, label: 'DISCOVER',
-        delayMs: i * HOP_MS, durationMs: HOP_MS,
-      })),
-      // OFFER (router → client)
-      ...[...eids].reverse().map((edgeId, i) => ({
-        id: `pkt-${ts}-o${i}`, edgeId, protocol: 'UDP' as const, label: 'OFFER',
-        delayMs: (N + i) * HOP_MS, durationMs: HOP_MS, reverse: true,
-      })),
-      // REQUEST (client → router)
-      ...eids.map((edgeId, i) => ({
-        id: `pkt-${ts}-req${i}`, edgeId, protocol: 'UDP' as const, label: 'REQUEST',
-        delayMs: (2 * N + i) * HOP_MS, durationMs: HOP_MS,
-      })),
-      // ACK (router → client)
-      ...[...eids].reverse().map((edgeId, i) => ({
-        id: `pkt-${ts}-ack${i}`, edgeId, protocol: 'UDP' as const, label: 'ACK',
-        delayMs: (3 * N + i) * HOP_MS, durationMs: HOP_MS, reverse: true,
-      })),
+      ...leg(path, ctx.edges, 'UDP', 'DISCOVER', 0),               // client → router
+      ...leg(path, ctx.edges, 'UDP', 'OFFER',    legMs, true),     // router → client
+      ...leg(path, ctx.edges, 'UDP', 'REQUEST',  2 * legMs),       // client → router
+      ...leg(path, ctx.edges, 'UDP', 'ACK',      3 * legMs, true), // router → client
     ]
     ctx.dispatchPackets?.(dhcpPackets)
 
