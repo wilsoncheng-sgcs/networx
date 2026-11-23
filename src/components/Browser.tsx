@@ -126,7 +126,7 @@ export default function Browser({ nodeId }: Props) {
   return (
     <div className="flex flex-col h-full bg-gray-100">
       {/* Browser chrome */}
-      <div className="flex items-center gap-1.5 px-2 py-2 bg-white border-b border-gray-200 flex-shrink-0">
+      <div className="relative flex items-center gap-1.5 px-2 py-2 bg-white border-b border-gray-200 flex-shrink-0">
         <button
           className={`p-1.5 rounded-md transition-colors ${canBack ? 'hover:bg-gray-100 text-gray-600' : 'text-gray-300 cursor-not-allowed'}`}
           onClick={goBack} disabled={!canBack} title="Back"
@@ -147,7 +147,7 @@ export default function Browser({ nodeId }: Props) {
         </button>
 
         {/* Address bar */}
-        <div className="relative flex-1 flex items-center gap-1.5 bg-gray-100 border border-gray-200 rounded-full px-2.5 py-1 focus-within:border-blue-400 focus-within:bg-white transition-colors min-w-0">
+        <div className="flex-1 flex items-center gap-1.5 bg-gray-100 border border-gray-200 rounded-full px-2.5 py-1 focus-within:border-blue-400 focus-within:bg-white transition-colors min-w-0">
           {page && !editing ? (
             page.secure ? (
               <button
@@ -185,7 +185,7 @@ export default function Browser({ nodeId }: Props) {
 
           {showSecurity && page?.secure && (
             <div
-              className="absolute top-full left-0 mt-1.5 w-64 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-20 text-xs text-gray-700 leading-relaxed"
+              className="absolute top-full left-2 right-2 mt-0.5 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-20 text-xs text-gray-700 leading-relaxed"
               data-testid="security-popover"
             >
               <div className="flex items-center gap-1.5 font-semibold mb-1"><Lock size={12} /> Connection is encrypted (TLS 1.3)</div>

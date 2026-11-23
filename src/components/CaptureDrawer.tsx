@@ -52,6 +52,15 @@ export default function CaptureDrawer() {
 
   const selected = selectedNo === null ? null : captures.find((r) => r.no === selectedNo) ?? null
 
+  // Keep the selected row in view when the detail pane opens beneath it
+  useEffect(() => {
+    if (selectedNo === null) return
+    const t = setTimeout(() => {
+      tableRef.current?.querySelector(`[data-no="${selectedNo}"]`)?.scrollIntoView({ block: 'nearest' })
+    }, 0)
+    return () => clearTimeout(t)
+  }, [selectedNo])
+
   // Follow new packets unless the user has scrolled up to look at older ones
   useEffect(() => {
     const el = tableRef.current
@@ -153,6 +162,7 @@ export default function CaptureDrawer() {
               return (
                 <tr
                   key={r.no}
+                  data-no={r.no}
                   className={`cursor-pointer border-b border-white ${isSel ? 'outline outline-2 outline-blue-500 -outline-offset-2' : ''}`}
                   style={{ background: isSel ? '#dbeafe' : protocolTint(proto) }}
                   onClick={() => setSelectedNo(isSel ? null : r.no)}

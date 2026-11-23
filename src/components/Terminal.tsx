@@ -180,12 +180,13 @@ export default function Terminal({ nodeId, onClose }: Props) {
       <div
         className="flex-1 overflow-y-auto px-3 py-2 space-y-0.5 cursor-text"
         onClick={() => inputRef.current?.focus()}
+        data-testid="terminal-output"
       >
         {lines.length === 0 && (
           <p className="text-gray-500 text-xs">Type <span className="text-green-400">help</span> to see available commands.</p>
         )}
         {lines.map((line, i) => (
-          <div key={i} style={{ color: lineColor(line.type), whiteSpace: 'pre-wrap', lineHeight: '1.5' }}>
+          <div key={i} style={{ color: lineColor(line.type), whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: '1.5' }}>
             {line.text}
           </div>
         ))}

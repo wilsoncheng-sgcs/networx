@@ -106,6 +106,9 @@ interface NetworkStore {
   recentConns: Record<string, ConnRecord[]>
   recordConnection: (nodeId: string, conn: ConnRecord) => void
 
+  // Bumped when a whole network is loaded, so the canvas re-fits the view
+  layoutVersion: number
+
   // Persistence & presets
   saveToStorage: () => void
   loadPreset: (preset: Preset) => void
@@ -129,6 +132,7 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
   captureOpen: false,
   captureStartMs: Date.now(),
   recentConns: {},
+  layoutVersion: 0,
 
   onNodesChange: (changes) =>
     set((s) => ({ nodes: applyNodeChanges(changes, s.nodes) })),
@@ -344,6 +348,8 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
     set({
       nodes: preset.nodes.map(normaliseNode),
       edges: preset.edges,
+      layoutVersion: get().layoutVersion + 1,
+      recentConns: {},
       selectedNodeId: null,
       activePanel: null,
     })

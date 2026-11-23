@@ -37,10 +37,33 @@ function NetworkCanvas() {
     nodes, edges,
     onNodesChange, onEdgesChange, onConnect,
     addDevice, selectNode, saveToStorage,
-    setPanel,
+    setPanel, layoutVersion, captureOpen,
   } = useNetworkStore()
 
-  const { screenToFlowPosition } = useReactFlow()
+  const { screenToFlowPosition, fitView } = useReactFlow()
+
+  // Keep a loaded network fitted to the canvas as panels and the capture drawer open and close,
+  // until the user pans or zooms it themselves. Loading a preset or import fits it again.
+  const wrapperRef = useRef<HTMLDivElement>(null)
+  const autoFit = useRef(true)
+  useEffect(() => {
+    autoFit.current = true
+    if (layoutVersion === 0) return
+    const t = setTimeout(() => fitView({ padding: 0.12, duration: 200 }), 50)
+    return () => clearTimeout(t)
+  }, [layoutVersion, fitView])
+  useEffect(() => {
+    const el = wrapperRef.current
+    if (!el) return
+    let t: ReturnType<typeof setTimeout> | undefined
+    const ro = new ResizeObserver(() => {
+      if (!autoFit.current) return
+      clearTimeout(t)
+      t = setTimeout(() => fitView({ padding: 0.12 }), 60)
+    })
+    ro.observe(el)
+    return () => { ro.disconnect(); clearTimeout(t) }
+  }, [fitView])
 
   // Auto-save 1.5 s after last change
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -74,7 +97,7 @@ function NetworkCanvas() {
   }
 
   return (
-    <div className="flex-1 relative" onDrop={handleDrop} onDragOver={handleDragOver}>
+    <div ref={wrapperRef} className="flex-1 relative min-h-0" onDrop={handleDrop} onDragOver={handleDragOver}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -85,6 +108,7 @@ function NetworkCanvas() {
         onConnect={onConnect}
         onNodeClick={handleNodeClick}
         onPaneClick={handlePaneClick}
+        onMoveStart={(event) => { if (event) autoFit.current = false }}
         fitView
         fitViewOptions={{ padding: 0.2 }}
         deleteKeyCode="Delete"
@@ -105,7 +129,7 @@ function NetworkCanvas() {
             const node = n as NetNode
             return colors[node.data?.deviceType ?? ''] ?? '#6b7280'
           }}
-          style={{ background: '#f9fafb' }}
+          style={{ background: '#f9fafb', width: captureOpen ? 120 : 200, height: captureOpen ? 80 : 150 }}
         />
       </ReactFlow>
 
@@ -295,7 +319,7 @@ function SpeedControl() {
   return (
     <label className="flex items-center gap-1.5 text-sm text-gray-600" title="Packet animation speed (Normal for the projector, Fast for students)">
       <Gauge size={14} />
-      <span className="sr-only sm:not-sr-only">Speed</span>
+      <span className="sr-only 2xl:not-sr-only">Speed</span>
       <select
         className="border border-gray-200 rounded-md px-1.5 py-1 text-sm bg-white outline-none focus:ring-2 focus:ring-blue-300"
         value={String(animSpeed)}
@@ -388,7 +412,7 @@ function Toolbar({ connectionType, setConnectionType, onDeleteSelected, onShowIn
         </>
       )}
 
-      <div className="ml-auto flex items-center gap-2">
+      <div className="ml-auto flex items-center gap-1.5">
         <SpeedControl />
         <button
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${

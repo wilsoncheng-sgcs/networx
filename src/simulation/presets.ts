@@ -93,25 +93,25 @@ const careConnect: Preset = {
   name: 'CareConnect',
   description: "CareConnect's servers, a patient at home and a clinic. Use with the packet capture: follow a web request, compare FTP with SFTP, and POP3 with IMAP.",
   nodes: [
-    node('net',       'cloud',   'Internet',           '0.0.0.0',       { x: 380, y: 260 },
+    node('net',       'cloud',   'Internet',           '0.0.0.0',       { x: 340, y: 150 },
       { mac: 'aa:bb:cc:00:00:01', notes: 'The public internet. Try: nslookup www.careconnect.example from any device.' }),
 
     // Home (left)
-    node('homegw',    'gateway', 'Home Gateway',       '192.168.1.1',   { x: 140, y: 260 },
+    node('homegw',    'gateway', 'Home Gateway',       '192.168.1.1',   { x: 170, y: 150 },
       { mac: 'aa:bb:cc:01:00:01', wanIp: '198.51.100.23', dhcpEnabled: true, dhcpPool: '100-200',
         ssid: 'HomeNet', wpaKey: 'password123', band: '5GHz',
         notes: "The patient's home router. Try: ping 192.168.1.1 from the Patient's Laptop." }),
-    node('patient',   'laptop',  "Patient's Laptop",   '192.168.1.101', { x: -80, y: 260 },
+    node('patient',   'laptop',  "Patient's Laptop",   '192.168.1.101', { x: 0, y: 150 },
       { mac: 'aa:bb:cc:01:01:01',
         notes: 'Try: curl -v http://www.careconnect.example then curl -v https://www.careconnect.example' }),
 
     // CareConnect servers (top right)
-    node('ccrouter',  'router',  'CareConnect Router', '203.0.113.1',   { x: 600, y: 120 },
+    node('ccrouter',  'router',  'CareConnect Router', '203.0.113.1',   { x: 520, y: 40 },
       { mac: 'aa:bb:cc:02:00:01', wanIp: '198.51.100.1',
         notes: "Try: traceroute www.careconnect.example from the Patient's Laptop." }),
-    node('ccsw',      'switch',  'Server Switch',      '',              { x: 800, y: 120 },
+    node('ccsw',      'switch',  'Server Switch',      '',              { x: 690, y: 40 },
       { mac: 'aa:bb:cc:02:00:02', notes: "Try: run a curl, then open this switch's MAC Table." }),
-    node('ccdns',     'dns',     'DNS Server',         '203.0.113.53',  { x: 1020, y: -100 },
+    node('ccdns',     'dns',     'DNS Server',         '203.0.113.53',  { x: 860, y: -70 },
       { mac: 'aa:bb:cc:02:00:53',
         dnsRecords: [
           { id: 'cc1', hostname: 'careconnect.example',       ip: '203.0.113.80' },
@@ -120,11 +120,11 @@ const careConnect: Preset = {
           { id: 'cc4', hostname: 'files.careconnect.example', ip: '203.0.113.21' },
         ],
         notes: 'Try: nslookup files.careconnect.example (from any device).' }),
-    node('ccweb',     'web',     'CareConnect Web',    '203.0.113.80',  { x: 1020, y: 40 },
+    node('ccweb',     'web',     'CareConnect Web',    '203.0.113.80',  { x: 1010, y: -70 },
       { mac: 'aa:bb:cc:02:00:80', pageContent: CARECONNECT_PAGE,
         services: { http: true, https: true }, certificate: 'valid', redirectHttp: false,
         notes: "Try: curl -v https://www.careconnect.example (from the Patient's Laptop)." }),
-    node('ccmail',    'mail',    'Mail Server',        '203.0.113.25',  { x: 1020, y: 180 },
+    node('ccmail',    'mail',    'Mail Server',        '203.0.113.25',  { x: 860, y: 90 },
       { mac: 'aa:bb:cc:02:00:25', certificate: 'valid', mailDomain: 'careconnect.example',
         mailboxes: [
           { address: 'reception@careconnect.example', password: 'Front2026!', messages: [
@@ -139,20 +139,20 @@ const careConnect: Preset = {
           ] },
         ],
         notes: "Try: pop3 dr.nguyen@careconnect.example (from the Doctor's PC), then the same from the Doctor's Laptop." }),
-    node('ccfile',    'file',    'File Server',        '203.0.113.21',  { x: 1020, y: 320 },
+    node('ccfile',    'file',    'File Server',        '203.0.113.21',  { x: 1010, y: 90 },
       { mac: 'aa:bb:cc:02:00:21', services: { ftp: true, ssh: true },
         account: { user: 'clinic', password: 'Clinic2026!' }, files: defaultFiles(),
         notes: 'Try: ftp files.careconnect.example get referrals.csv, then sftp … (from the Reception PC).' }),
 
     // Clinic (bottom)
-    node('clinicgw',  'gateway', 'Clinic Gateway',     '10.0.0.1',      { x: 380, y: 470 },
+    node('clinicgw',  'gateway', 'Clinic Gateway',     '10.0.0.1',      { x: 340, y: 330 },
       { mac: 'aa:bb:cc:03:00:01', wanIp: '198.51.100.77', ssid: 'CareConnect-Staff', band: '5GHz',
         notes: 'Try: ping 10.0.0.1 from the Reception PC.' }),
-    node('reception', 'pc',      'Reception PC',       '10.0.0.11',     { x: 160, y: 650 },
+    node('reception', 'pc',      'Reception PC',       '10.0.0.11',     { x: 170, y: 470 },
       { mac: 'aa:bb:cc:03:00:11', notes: 'Try: ftp files.careconnect.example get referrals.csv' }),
-    node('doclaptop', 'laptop',  "Doctor's Laptop",    '10.0.0.12',     { x: 380, y: 670 },
+    node('doclaptop', 'laptop',  "Doctor's Laptop",    '10.0.0.12',     { x: 340, y: 490 },
       { mac: 'aa:bb:cc:03:00:12', notes: 'Try: imap dr.nguyen@careconnect.example' }),
-    node('docpc',     'pc',      "Doctor's PC",        '10.0.0.13',     { x: 600, y: 650 },
+    node('docpc',     'pc',      "Doctor's PC",        '10.0.0.13',     { x: 510, y: 470 },
       { mac: 'aa:bb:cc:03:00:13', notes: 'Try: pop3 dr.nguyen@careconnect.example' }),
   ],
   edges: [
