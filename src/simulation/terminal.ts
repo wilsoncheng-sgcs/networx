@@ -7,6 +7,7 @@ import { tokenize } from './tokenize'
 import { dnsConversation, runConversations } from './exchange'
 import { cmdCurl } from './protocols/web'
 import { cmdFtp, cmdSftp } from './protocols/files'
+import { cmdPop3, cmdImap, cmdSmtp, cmdMail } from './protocols/mail'
 
 export type { TermContext } from './context'
 export { makePackets, makePacketsWithArp, edgesOnPath, finishMs, startAfter } from './packets'
@@ -425,6 +426,10 @@ export function runCommand(raw: string, baseCtx: TermContext): TerminalLine[] {
     case 'route': return cmdRoute(args, ctx)
     case 'curl':
     case 'wget': return cmdCurl(args, ctx)
+    case 'pop3': return cmdPop3(args, ctx)
+    case 'imap': return cmdImap(args, ctx)
+    case 'smtp': return cmdSmtp(args, ctx)
+    case 'mail': return cmdMail(args, ctx)
     case 'ftp': return cmdFtp(args, ctx)
     case 'sftp': return cmdSftp(args, ctx)
     case 'ssh': return cmdSsh(args, ctx)

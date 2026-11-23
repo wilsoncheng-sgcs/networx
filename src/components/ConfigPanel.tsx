@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { X, Plus, Trash2, Power } from 'lucide-react'
+import { X, Plus, Trash2, Power, RotateCcw } from 'lucide-react'
 import { useNetworkStore } from '../store'
-import type { FirewallRule, DnsRecord, StoredFile } from '../types'
-import { DEFAULT_ACCOUNT } from '../simulation/defaults'
+import type { FirewallRule, DnsRecord, StoredFile, Mailbox, NetNode } from '../types'
+import { DEFAULT_ACCOUNT, defaultMailboxes } from '../simulation/defaults'
+import { PRESETS } from '../simulation/presets'
 
 
 interface Props {
@@ -73,6 +74,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
   const isWeb = data.deviceType === 'web'
   const isDns = data.deviceType === 'dns'
   const isFile = data.deviceType === 'file'
+  const isMail = data.deviceType === 'mail'
   const hasIp = !(isSwitch || isHub)
 
   const TABS = [
@@ -84,6 +86,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
     ...(isWeb ? [{ id: 'page',     label: 'Page' }]       : []),
     ...(isDns ? [{ id: 'records',  label: 'Records' }]    : []),
     ...(isFile ? [{ id: 'files',   label: 'Files' }]      : []),
+    ...(isMail ? [{ id: 'mailboxes', label: 'Mailboxes' }] : []),
   ] as { id: string; label: string }[]
 
   return (
@@ -390,6 +393,16 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
           />
         )}
 
+        {tab === 'mailboxes' && isMail && (
+          <MailboxesTab
+            domain={data.mailDomain ?? ''}
+            mailboxes={data.mailboxes ?? []}
+            onDomain={(mailDomain) => upd({ mailDomain })}
+            onMailboxes={(mailboxes) => upd({ mailboxes })}
+            onRestore={() => upd({ mailboxes: restoreSampleMail(node) })}
+          />
+        )}
+
         {tab === 'security' && (isFirewall || isGateway) && (
           <div>
             <div className="flex items-center justify-between mb-3">
@@ -578,6 +591,116 @@ function FilesTab({ account, files, onAccount, onFiles }: {
           ))}
           {files.length === 0 && <p className="text-xs text-gray-400 text-center py-4">No files.</p>}
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Mail server: mailboxes ───────────────────────────────────────────────────
+
+/** The sample mailboxes for this server: from the preset it came from, else the defaults. */
+function sampleMailboxes(node: NetNode): Mailbox[] {
+  const fromPreset = PRESETS.flatMap((p) => p.nodes).find(
+    (n) => n.data.deviceType === 'mail' && (n.id === node.id || (!!n.data.mailDomain && n.data.mailDomain === node.data.mailDomain)),
+  )
+  return structuredClone(fromPreset?.data.mailboxes ?? defaultMailboxes())
+}
+
+/** Put the sample messages back (needed to re-run the POP3 demo). Other mailboxes are left alone. */
+function restoreSampleMail(node: NetNode): Mailbox[] {
+  const samples = sampleMailboxes(node)
+  const current = node.data.mailboxes ?? []
+  const restored = current.map((b) => {
+    const sample = samples.find((s) => s.address.toLowerCase() === b.address.toLowerCase())
+    return sample ? { ...b, messages: sample.messages } : b
+  })
+  const missing = samples.filter((s) => !current.some((b) => b.address.toLowerCase() === s.address.toLowerCase()))
+  return [...restored, ...missing]
+}
+
+function MailboxesTab({ domain, mailboxes, onDomain, onMailboxes, onRestore }: {
+  domain: string
+  mailboxes: Mailbox[]
+  onDomain: (d: string) => void
+  onMailboxes: (m: Mailbox[]) => void
+  onRestore: () => void
+}) {
+  const [open, setOpen] = useState<number | null>(0)
+  const update = (i: number, patch: Partial<Mailbox>) => onMailboxes(mailboxes.map((b, j) => (j === i ? { ...b, ...patch } : b)))
+  return (
+    <div className="space-y-3">
+      <Field label="Mail domain" value={domain} onChange={onDomain} placeholder="careconnect.example" mono />
+      <p className="text-xs text-gray-400">
+        Clients find this server as <code className="bg-gray-100 px-1 rounded font-mono">mail.{domain || '<domain>'}</code>: it needs a DNS A record.
+      </p>
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-gray-700">Mailboxes</h3>
+        <div className="flex gap-1.5">
+          <button
+            className="flex items-center gap-1 text-xs bg-amber-50 text-amber-700 hover:bg-amber-100 px-2 py-1 rounded transition-colors"
+            onClick={onRestore}
+            title="Put the sample messages back, e.g. after a POP3 demo emptied the mailbox"
+            data-testid="restore-mail"
+          >
+            <RotateCcw size={12} /> Restore sample mail
+          </button>
+          <button
+            className="flex items-center gap-1 text-xs bg-blue-50 text-blue-600 hover:bg-blue-100 px-2 py-1 rounded transition-colors"
+            onClick={() => onMailboxes([...mailboxes, { address: `user${mailboxes.length + 1}@${domain || 'example.local'}`, password: 'password123', messages: [] }])}
+          >
+            <Plus size={12} /> Add
+          </button>
+        </div>
+      </div>
+      <div className="space-y-2">
+        {mailboxes.map((b, i) => (
+          <div key={i} className="bg-gray-50 rounded-lg p-2 relative" data-testid="mailbox">
+            <button
+              className="absolute top-2 right-2 text-gray-300 hover:text-red-400 transition-colors"
+              onClick={() => onMailboxes(mailboxes.filter((_, j) => j !== i))}
+              title="Remove mailbox"
+            >
+              <Trash2 size={12} />
+            </button>
+            <input
+              className="w-[85%] font-mono text-xs border border-gray-200 rounded px-1.5 py-0.5 mb-1 bg-white"
+              value={b.address}
+              onChange={(e) => update(i, { address: e.target.value })}
+            />
+            <div className="flex items-center gap-2">
+              <input
+                className="flex-1 font-mono text-xs border border-gray-200 rounded px-1.5 py-0.5 bg-white"
+                value={b.password}
+                onChange={(e) => update(i, { password: e.target.value })}
+                title="Password"
+              />
+              <button
+                className="text-xs text-blue-600 hover:underline whitespace-nowrap"
+                onClick={() => setOpen(open === i ? null : i)}
+                data-testid="mailbox-count"
+              >
+                {b.messages.length} message{b.messages.length === 1 ? '' : 's'}
+              </button>
+            </div>
+            {open === i && b.messages.length > 0 && (
+              <table className="w-full text-[11px] mt-1.5">
+                <thead>
+                  <tr className="text-gray-400"><th className="text-left font-medium">From</th><th className="text-left font-medium">Subject</th><th className="font-medium">Seen</th></tr>
+                </thead>
+                <tbody>
+                  {b.messages.map((m) => (
+                    <tr key={m.id} className="border-t border-gray-100">
+                      <td className="py-0.5 pr-1 truncate max-w-[90px] font-mono">{m.from}</td>
+                      <td className="py-0.5 pr-1">{m.subject}</td>
+                      <td className="py-0.5 text-center">{m.seen ? '✓' : '–'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        ))}
+        {mailboxes.length === 0 && <p className="text-xs text-gray-400 text-center py-4">No mailboxes.</p>}
       </div>
     </div>
   )

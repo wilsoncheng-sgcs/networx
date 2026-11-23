@@ -169,6 +169,7 @@ export function insideTls(steps: Step[]): Step[] {
     encrypted: true,
     label: s.label.startsWith('🔒') ? s.label : `🔒 ${s.label}`.slice(0, 14),
     info: 'Application Data',
+    note: undefined,  // nothing about the content may leak into the capture
   }))
 }
 

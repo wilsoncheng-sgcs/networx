@@ -16,6 +16,8 @@ export interface TermContext {
   recordConnection?: (nodeId: string, conn: ConnRecord) => void
   /** This node's recent TCP connections, newest first (for plain netstat). */
   recentConnections?: ConnRecord[]
+  /** Run a state change later (when a session's last packet arrives). Absent: run it now. */
+  schedule?: (ms: number, fn: () => void) => void
   /** ARP lookups already animated while running this command (the node snapshot doesn't update mid-command). */
   arpSeen?: Set<string>
 }

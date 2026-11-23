@@ -78,6 +78,7 @@ export default function Terminal({ nodeId, onClose }: Props) {
       selfId: sshNodeId ?? nodeId,
       nodes, edges, learnMac, learnArp, dispatchPackets, updateNodeData,
       dispatchCaptures, recordConnection,
+      schedule: (ms, fn) => { setTimeout(fn, ms) },
       recentConnections: recentConns[sshNodeId ?? nodeId] ?? [],
     })
 
