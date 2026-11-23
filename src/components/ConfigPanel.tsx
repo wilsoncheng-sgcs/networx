@@ -3,10 +3,6 @@ import { X, Plus, Trash2, Power } from 'lucide-react'
 import { useNetworkStore } from '../store'
 import type { FirewallRule, DnsRecord } from '../types'
 
-const LEVEL_ORDER = { ks3: 3, ks4: 4, ks5: 5 } as const
-function atLeast(current: string, min: 'ks3' | 'ks4' | 'ks5') {
-  return LEVEL_ORDER[current as keyof typeof LEVEL_ORDER] >= LEVEL_ORDER[min]
-}
 
 interface Props {
   nodeId: string
@@ -34,7 +30,7 @@ function Field({ label, value, onChange, placeholder = '', mono = false }: {
 }
 
 export default function ConfigPanel({ nodeId, onClose }: Props) {
-  const { nodes, updateNodeData, addRoute, removeRoute, addRule, removeRule, addDnsRecord, removeDnsRecord, level } = useNetworkStore()
+  const { nodes, updateNodeData, addRoute, removeRoute, addRule, removeRule, addDnsRecord, removeDnsRecord } = useNetworkStore()
   const node = nodes.find((n) => n.id === nodeId)
   const [tab, setTab] = useState<'basic' | 'advanced' | 'security' | 'wireless' | 'page' | 'records'>('basic')
 
@@ -77,17 +73,14 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
   const isDns = data.deviceType === 'dns'
   const hasIp = !(isSwitch || isHub)
 
-  const advanced = atLeast(level, 'ks4')
-  const ks5 = atLeast(level, 'ks5')
-
   const TABS = [
     { id: 'basic',    label: 'Basic' },
-    ...(isSwitch                        && advanced ? [{ id: 'advanced', label: 'MAC Table' }] : []),
-    ...((isRouter   || isGateway)       && advanced ? [{ id: 'advanced', label: 'Routing' }]   : []),
-    ...((isWap      || isGateway)       && advanced ? [{ id: 'wireless', label: 'Wireless' }]  : []),
-    ...((isFirewall || isGateway)       && advanced ? [{ id: 'security', label: 'Security' }]  : []),
-    ...(isWeb                           && advanced ? [{ id: 'page',     label: 'Page' }]       : []),
-    ...(isDns                           && advanced ? [{ id: 'records',  label: 'Records' }]    : []),
+    ...(isSwitch ? [{ id: 'advanced', label: 'MAC Table' }] : []),
+    ...((isRouter   || isGateway) ? [{ id: 'advanced', label: 'Routing' }]   : []),
+    ...((isWap      || isGateway) ? [{ id: 'wireless', label: 'Wireless' }]  : []),
+    ...((isFirewall || isGateway) ? [{ id: 'security', label: 'Security' }]  : []),
+    ...(isWeb ? [{ id: 'page',     label: 'Page' }]       : []),
+    ...(isDns ? [{ id: 'records',  label: 'Records' }]    : []),
   ] as { id: string; label: string }[]
 
   return (
@@ -140,26 +133,22 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
             <Field label="Label" value={data.label} onChange={(v) => upd({ label: v })} />
             {hasIp && (
               <>
-                {(isRouter || isGateway) && ks5 && (
+                {(isRouter || isGateway) && (
                   <Field label="WAN IP — eth0 (ISP-facing)" value={(data.wanIp as string) ?? ''} onChange={(v) => upd({ wanIp: v })} placeholder="e.g. 82.1.2.3" mono />
                 )}
-                <Field label={(isRouter || isGateway) && ks5 ? 'LAN IP — eth1 (network-facing)' : 'IP Address'} value={data.ip} onChange={(v) => upd({ ip: v })} placeholder="192.168.1.x" mono />
-                {advanced && (
-                  <>
-                    <Field label="Subnet Mask" value={data.subnet} onChange={(v) => upd({ subnet: v })} placeholder="255.255.255.0" mono />
-                    <Field label="Default Gateway" value={data.gateway} onChange={(v) => upd({ gateway: v })} placeholder="192.168.1.1" mono />
-                    <div className="flex flex-col gap-1">
-                      <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">MAC Address</label>
-                      <span className="font-mono text-sm text-gray-600 bg-gray-50 rounded-md px-2.5 py-1.5 border border-gray-100">
-                        {data.mac}
-                      </span>
-                    </div>
-                  </>
-                )}
+                <Field label={(isRouter || isGateway) ? 'LAN IP — eth1 (network-facing)' : 'IP Address'} value={data.ip} onChange={(v) => upd({ ip: v })} placeholder="192.168.1.x" mono />
+                <Field label="Subnet Mask" value={data.subnet} onChange={(v) => upd({ subnet: v })} placeholder="255.255.255.0" mono />
+                <Field label="Default Gateway" value={data.gateway} onChange={(v) => upd({ gateway: v })} placeholder="192.168.1.1" mono />
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">MAC Address</label>
+                  <span className="font-mono text-sm text-gray-600 bg-gray-50 rounded-md px-2.5 py-1.5 border border-gray-100">
+                    {data.mac}
+                  </span>
+                </div>
               </>
             )}
-            {/* DHCP server section — routers and gateways, KS4+ */}
-            {(isRouter || isGateway) && advanced && (
+            {/* DHCP server section — routers and gateways */}
+            {(isRouter || isGateway) && (
               <div className="border border-gray-100 rounded-lg p-3 space-y-3 bg-gray-50">
                 <div className="flex items-center justify-between">
                   <div>
@@ -203,7 +192,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
 
         {tab === 'advanced' && (isRouter || isGateway) && (
           <div>
-            {ks5 && (data.wanIp || data.ip) && (
+            {(data.wanIp || data.ip) && (
               <div className="mb-3 text-xs text-gray-400 font-mono bg-gray-50 rounded px-2.5 py-2 border border-gray-100">
                 eth0 (WAN) = {(data.wanIp as string) || '(not set)'}
                 {'  ·  '}

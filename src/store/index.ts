@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { addEdge, applyNodeChanges, applyEdgeChanges } from '@xyflow/react'
 import type { NodeChange, EdgeChange, Connection } from '@xyflow/react'
-import type { NetNode, NetEdge, NodeData, PanelType, RouteEntry, MacEntry, ArpEntry, FirewallRule, DnsRecord, TerminalLine, PacketAnim, Level } from '../types'
+import type { NetNode, NetEdge, NodeData, PanelType, RouteEntry, MacEntry, ArpEntry, FirewallRule, DnsRecord, TerminalLine, PacketAnim } from '../types'
 import { makeDefaultData } from '../simulation/defaults'
 import type { Preset } from '../simulation/presets'
 
@@ -11,11 +11,11 @@ let idCounter = 100
 function nextId(prefix: string) { return `${prefix}-${++idCounter}` }
 
 // Try to restore saved state on first load
-function loadSaved(): { nodes: NetNode[]; edges: NetEdge[]; level?: Level } | null {
+function loadSaved(): { nodes: NetNode[]; edges: NetEdge[] } | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
-    return JSON.parse(raw) as { nodes: NetNode[]; edges: NetEdge[]; level?: Level }
+    return JSON.parse(raw) as { nodes: NetNode[]; edges: NetEdge[] }
   } catch {
     return null
   }
@@ -28,8 +28,6 @@ interface NetworkStore {
   activePanel: PanelType
   connectionType: 'wired' | 'wireless'
   showLayers: boolean
-  level: Level
-  setLevel: (l: Level) => void
 
   // ReactFlow handlers
   onNodesChange: (changes: NodeChange<NetNode>[]) => void
@@ -91,7 +89,6 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
   activePanel: null,
   connectionType: 'wired',
   showLayers: false,
-  level: saved?.level ?? 'ks3',
   activePackets: [],
 
   onNodesChange: (changes) =>
@@ -153,14 +150,6 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
   setConnectionType: (t) => set({ connectionType: t }),
 
   toggleLayers: () => set((s) => ({ showLayers: !s.showLayers })),
-
-  setLevel: (l) => {
-    set({ level: l })
-    try {
-      const { nodes, edges } = get()
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ nodes, edges, level: l }))
-    } catch { /* quota exceeded */ }
-  },
 
   appendTermLine: (nodeId, line) =>
     set((s) => ({
@@ -272,9 +261,9 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
   },
 
   saveToStorage: () => {
-    const { nodes, edges, level } = get()
+    const { nodes, edges } = get()
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ nodes, edges, level }))
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ nodes, edges }))
     } catch { /* quota exceeded — silently skip */ }
   },
 
@@ -284,7 +273,6 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
       edges: preset.edges,
       selectedNodeId: null,
       activePanel: null,
-      ...(preset.level ? { level: preset.level } : {}),
     })
   },
 

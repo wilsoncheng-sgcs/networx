@@ -1,11 +1,10 @@
-import type { NetNode, NetEdge, TerminalLine, MacEntry, ArpEntry, PacketAnim, Level, NodeData } from '../types'
+import type { NetNode, NetEdge, TerminalLine, MacEntry, ArpEntry, PacketAnim, NodeData } from '../types'
 import { findPath, nodeByIp, nodeById, sameSubnet, simulatePingRtt, subnetToCidr } from './network'
 
 export interface TermContext {
   selfId: string
   nodes: NetNode[]
   edges: NetEdge[]
-  level?: Level
   learnMac?: (switchId: string, entry: MacEntry) => void
   learnArp?: (nodeId: string, entry: ArpEntry) => void
   dispatchPackets?: (packets: PacketAnim[]) => void
@@ -781,33 +780,25 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
   return [err('dhclient: No DHCP server found. Is a router with DHCP enabled connected to this network?')]
 }
 
-function cmdHelp(ctx: TermContext): Lines {
-  const ks3 = ctx.level === 'ks3'
-  const lines: Lines = [
+function cmdHelp(): Lines {
+  return [
     out('Available commands:'),
     out('  ping <ip|host>     – Test connectivity'),
     out('  ipconfig           – Show IP configuration (Windows style)'),
     out('  ifconfig           – Show IP configuration (Linux style)'),
-  ]
-  if (!ks3) {
-    lines.push(
-      out('  traceroute <ip|host>– Trace network path (hostname ok)'),
-      out('  nslookup <domain>  – Query DNS for a domain name'),
-      out('  arp -a             – Show ARP table (neighbours)'),
-      out('  arp -d [ip|*]      – Delete one or all ARP entries'),
-      out('  netstat            – Show active connections'),
-      out('  route              – Show routing table'),
-      out('  curl <url>         – Make HTTP request'),
-      out('  ssh <ip>           – Connect to remote host or router (exit to quit)'),
-      out('  dhclient           – Request IP from DHCP server'),
-      out('  ipconfig /renew    – Same as dhclient (Windows style)'),
-    )
-  }
-  lines.push(
+    out('  traceroute <ip|host>– Trace network path (hostname ok)'),
+    out('  nslookup <domain>  – Query DNS for a domain name'),
+    out('  arp -a             – Show ARP table (neighbours)'),
+    out('  arp -d [ip|*]      – Delete one or all ARP entries'),
+    out('  netstat            – Show active connections'),
+    out('  route              – Show routing table'),
+    out('  curl <url>         – Make HTTP request'),
+    out('  ssh <ip>           – Connect to remote host or router (exit to quit)'),
+    out('  dhclient           – Request IP from DHCP server'),
+    out('  ipconfig /renew    – Same as dhclient (Windows style)'),
     out('  clear              – Clear terminal'),
     out('  help               – Show this help'),
-  )
-  return lines
+  ]
 }
 
 // ─── Dispatcher ─────────────────────────────────────────────────────────────
@@ -832,7 +823,7 @@ export function runCommand(raw: string, ctx: TermContext): TerminalLine[] {
     case 'ssh': return cmdSsh(args, ctx)
     case 'dhclient': return cmdDhclient(args, ctx)
     case 'clear': return [{ type: 'output', text: '\x1bCLEAR' }]
-    case 'help': return cmdHelp(ctx)
+    case 'help': return cmdHelp()
     case '': return []
     default: return [err(`command not found: ${cmd}`)]
   }
