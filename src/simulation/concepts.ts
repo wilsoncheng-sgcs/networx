@@ -58,17 +58,19 @@ Each layer adds a **header** when sending (encapsulation) and removes it when re
     level: 'Both',
     tags: ['HTTP', 'HTTPS', 'TCP/IP', 'DNS', 'FTP', 'SFTP', 'SSL', 'TLS', 'SMTP', 'POP3', 'IMAP', 'ports'],
     summary: 'Protocols are agreed rules that allow devices to communicate. Servers listen on well-known port numbers.',
-    body: `| **Protocol** | **Transport** | **Port** | **What it does** | **Encrypted?** |
-| HTTP | TCP | 80 | Requests and sends web pages | No |
-| HTTPS | TCP | 443 | HTTP inside TLS | Yes (TLS) |
-| TCP/IP | — | none | TCP gives ports and reliable, ordered delivery; IP gives addresses and routing | No |
-| DNS | UDP (TCP for large answers) | 53 | Turns a name into an IP address | No |
-| FTP | TCP | 20/21 | File transfer: control on 21, data on 20 | No |
+    body: `| **Protocol** | **Trans&shy;port** | **Port** | **What it does** | **Encrypt&shy;ed?** |
+| HTTP | TCP | 80 | Web pages | No |
+| HTTPS | TCP | 443 | Web pages inside TLS | Yes (TLS) |
+| TCP/IP | — | none | TCP: ports, reliable ordered delivery. IP: addresses, routing | No |
+| DNS | UDP* | 53 | Name → IP address | No |
+| FTP | TCP | 20, 21 | File transfer (control 21, data 20) | No |
 | SFTP | TCP | 22 | File transfer inside SSH | Yes (SSH) |
-| SSL/TLS | TCP | none of its own | Wraps another protocol: 443, 465, 993, 995 | It is the encryption |
-| SMTP | TCP | 25 / 587 | Sends mail: 25 server → server, 587 client → server | No |
-| POP3 | TCP | 110 | Downloads mail to one device (usually deleted from the server) | No |
-| IMAP | TCP | 143 | Reads mail kept on the server; syncs across devices | No |
+| SSL/TLS | TCP | none | Wraps another protocol (443, 465, 993, 995) | It is the encryption |
+| SMTP | TCP | 25, 587 | Sends mail (25 server → server, 587 client → server) | No |
+| POP3 | TCP | 110 | Downloads mail to one device | No |
+| IMAP | TCP | 143 | Reads mail kept on the server | No |
+
+\* DNS uses TCP for large answers.
 
 **Worth knowing:** secure versions of the mail ports — SMTP 465, IMAP 993, POP3 995.
 
@@ -107,9 +109,9 @@ Try \`curl -v https://www.careconnect.example\` with the packet capture open.`,
     summary: 'TCP opens a connection with SYN, SYN-ACK, ACK. Each end of a connection has a port number.',
     body: `Before any data, TCP opens a connection with a **three-way handshake**:
 
-1. **SYN** — client → server: “I'd like to connect.”
-2. **SYN-ACK** — server → client: “OK, I'm ready.”
-3. **ACK** — client → server: “Connected.”
+- **1 · SYN** — client → server: “I'd like to connect.”
+- **2 · SYN-ACK** — server → client: “OK, I'm ready.”
+- **3 · ACK** — client → server: “Connected.”
 
 **Ports** say which program a packet is for:
 - The **server** listens on a **well-known port** (80 for HTTP, 443 for HTTPS, 22 for SSH…)
