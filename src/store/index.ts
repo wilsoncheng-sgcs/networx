@@ -3,7 +3,8 @@ import { addEdge, applyNodeChanges, applyEdgeChanges } from '@xyflow/react'
 import type { NodeChange, EdgeChange, Connection } from '@xyflow/react'
 import type { NetNode, NetEdge, NodeData, PanelType, RouteEntry, MacEntry, ArpEntry, FirewallRule, DnsRecord, TerminalLine, PacketAnim, AnimSpeed, CaptureRecord, PendingCapture, ConnRecord } from '../types'
 import { tapView } from '../simulation/tap'
-import { setAnimSpeed } from '../simulation/packets'
+import { setAnimSpeed, setStepping, scaledHop } from '../simulation/packets'
+import * as clock from '../simulation/clock'
 import { makeDefaultData, normaliseNode } from '../simulation/defaults'
 import type { Preset } from '../simulation/presets'
 
@@ -90,6 +91,13 @@ interface NetworkStore {
   animSpeed: AnimSpeed
   setAnimSpeed: (speed: AnimSpeed) => void
 
+  // Step mode (spec §7.4): Conversations pause before each Step until Next
+  stepMode: boolean
+  stepPaused: boolean
+  stepLabel: string
+  toggleStepMode: () => void
+  stepNext: () => void
+
   // Packet animations
   activePackets: PacketAnim[]
   dispatchPackets: (packets: PacketAnim[]) => void
@@ -132,6 +140,9 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
   showLayers: false,
   activePackets: [],
   animSpeed: initialSpeed,
+  stepMode: false,
+  stepPaused: false,
+  stepLabel: '',
   captures: [],
   captureOpen: false,
   captureStartMs: Date.now(),
@@ -309,17 +320,27 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
 
   dispatchPackets: (packets) => {
     // Instant: nothing animates
-    if (get().animSpeed === 'instant') return
-    // Stagger each packet's appearance via setTimeout so animateMotion starts at t=0
+    if (scaledHop(1) === 0) return
+    // Stagger each packet's appearance on the shared clock so animateMotion starts at t=0
+    // (and step mode can hold it back)
     packets.forEach((packet) => {
-      setTimeout(() => {
+      clock.after(packet.delayMs, () => {
         set((s) => ({ activePackets: [...s.activePackets, packet] }))
-        setTimeout(() => {
+        clock.after(packet.durationMs + 150, () => {
           set((s) => ({ activePackets: s.activePackets.filter((p) => p.id !== packet.id) }))
-        }, packet.durationMs + 150)
-      }, packet.delayMs)
+        })
+      })
     })
   },
+
+  toggleStepMode: () => {
+    const on = !get().stepMode
+    setStepping(on)
+    clock.setStepMode(on)
+    set({ stepMode: on })
+  },
+
+  stepNext: () => clock.next(),
 
   setCaptureOpen: (open) => set({ captureOpen: open }),
 
@@ -333,6 +354,10 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
     }),
 
   dispatchCaptures: (records) => {
+    // Step mode: pause before each Step of a Conversation (its capture record is due when the Step starts)
+    clock.addBreakpoints(records
+      .filter((r) => r.conversationId.startsWith('conv-'))
+      .map((r) => ({ delayMs: r.delayMs, label: r.info.replace(/^🔒 /, '') })))
     // A tapped link sees only the packets that cross it, with that link's MAC addresses
     const { tapEdgeId, edges, nodes } = get()
     const tap = tapEdgeId ? edges.find((e) => e.id === tapEdgeId) : undefined
@@ -344,7 +369,7 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
       : records
     // Each record appears when its packet leaves, so the list grows in time with the animation
     visible.forEach(({ delayMs, ...record }) => {
-      setTimeout(() => get().addCapture(record), delayMs)
+      clock.after(delayMs, () => get().addCapture(record))
     })
   },
 
@@ -382,3 +407,6 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
     localStorage.removeItem(STORAGE_KEY)
   },
 }))
+
+// The clock pauses and resumes by itself in step mode; mirror that for the toolbar
+clock.subscribe((c) => useNetworkStore.setState({ stepPaused: c.paused, stepLabel: c.nextLabel }))

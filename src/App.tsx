@@ -12,7 +12,7 @@ import '@xyflow/react/dist/style.css'
 import {
   BookOpen, Cable, Wifi, Trash2, HelpCircle,
   ChevronRight, ChevronLeft, Save, LayoutGrid, Check, X as XIcon,
-  Upload, Layers, Gauge, Radio,
+  Upload, Layers, Gauge, Radio, Footprints, StepForward,
 } from 'lucide-react'
 
 import { useNetworkStore } from './store'
@@ -132,6 +132,8 @@ function NetworkCanvas() {
           style={{ background: '#f9fafb', width: captureOpen ? 120 : 200, height: captureOpen ? 80 : 150 }}
         />
       </ReactFlow>
+
+      <StepBar />
 
       {nodes.length === 0 && (
         <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
@@ -335,6 +337,71 @@ function SpeedControl() {
   )
 }
 
+function StepToggle() {
+  const { stepMode, toggleStepMode } = useNetworkStore()
+  return (
+    <button
+      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-sm font-medium transition-colors ${
+        stepMode ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'text-gray-600 hover:bg-gray-50'
+      }`}
+      onClick={toggleStepMode}
+      title="Step mode: pause before each step of a conversation (Next or the space bar to go on)"
+      data-testid="step-toggle"
+    >
+      <Footprints size={14} /> Step
+    </button>
+  )
+}
+
+/** Step mode controls, over the top of the canvas where the projector audience is looking. */
+function StepBar() {
+  const { stepMode, stepPaused, stepLabel, stepNext, toggleStepMode } = useNetworkStore()
+
+  // The space bar advances, unless the user is typing somewhere
+  useEffect(() => {
+    if (!stepMode) return
+    function onKey(e: KeyboardEvent) {
+      if (e.code !== 'Space' && e.key !== ' ') return
+      const el = e.target as HTMLElement | null
+      if (el && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(el.tagName))) return
+      e.preventDefault()
+      stepNext()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [stepMode, stepNext])
+
+  if (!stepMode) return null
+  return (
+    <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 bg-white/95 border border-emerald-200 shadow-md rounded-full pl-3 pr-1.5 py-1 text-sm" data-testid="step-bar">
+      <Footprints size={14} className="text-emerald-600 flex-shrink-0" />
+      {stepPaused ? (
+        <span className="text-gray-700 max-w-[22rem] truncate">
+          Next step: <span className="font-mono text-xs bg-gray-100 rounded px-1 py-0.5" data-testid="step-label">{stepLabel}</span>
+        </span>
+      ) : (
+        <span className="text-gray-500">Step mode: run a command, then step through it</span>
+      )}
+      <button
+        className="flex items-center gap-1 px-3 py-1 rounded-full bg-emerald-600 text-white font-medium hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed"
+        onClick={stepNext}
+        disabled={!stepPaused}
+        title="Play the next step (space bar)"
+        data-testid="step-next"
+      >
+        Next <StepForward size={13} />
+      </button>
+      <button
+        className="text-gray-400 hover:text-gray-600 px-1"
+        onClick={toggleStepMode}
+        title="Leave step mode"
+      >
+        <XIcon size={13} />
+      </button>
+    </div>
+  )
+}
+
 function CaptureToggle() {
   const { captureOpen, setCaptureOpen, captures } = useNetworkStore()
   return (
@@ -424,6 +491,7 @@ function Toolbar({ connectionType, setConnectionType, onDeleteSelected, onShowIn
           <Layers size={14} /> Layers
         </button>
         <CaptureToggle />
+        <StepToggle />
         <button
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
             infoOpen ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'

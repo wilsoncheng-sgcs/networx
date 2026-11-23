@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { ArrowLeft, ArrowRight, RotateCw, Globe, X, Lock, ShieldAlert } from 'lucide-react'
 import { useNetworkStore } from '../store'
+import * as clock from '../simulation/clock'
 import { fetchUrl, parseUrl, BROWSER_USER_AGENT } from '../simulation/protocols/web'
 
 interface Props {
@@ -34,9 +35,9 @@ export default function Browser({ nodeId }: Props) {
   const [loading, setLoading] = useState<string | null>(null)
   const [showSecurity, setShowSecurity] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
-  const loadTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const loadTimer = useRef<number | null>(null)
 
-  useEffect(() => () => { if (loadTimer.current) clearTimeout(loadTimer.current) }, [])
+  useEffect(() => () => { if (loadTimer.current) clock.cancel(loadTimer.current) }, [])
 
   const navigate = useCallback((rawUrl: string, pushHistory = true, redirects = 0) => {
     const raw = rawUrl.trim()
@@ -57,9 +58,9 @@ export default function Browser({ nodeId }: Props) {
 
     setLoading(parsed.host)
     setError(null)
-    if (loadTimer.current) clearTimeout(loadTimer.current)
+    if (loadTimer.current) clock.cancel(loadTimer.current)
     // Show the page when its last packet arrives
-    loadTimer.current = setTimeout(() => {
+    loadTimer.current = clock.after(result.endMs, () => {
       // 301 Moved Permanently: a browser follows the Location header by itself
       if (result.ok && result.redirect && redirects < 5) {
         navigate(result.redirect, pushHistory, redirects + 1)
@@ -103,7 +104,7 @@ export default function Browser({ nodeId }: Props) {
         setHistory(next)
         setHistoryIndex(next.length - 1)
       }
-    }, result.endMs)
+    })
   }, [nodeId, nodes, edges, learnMac, learnArp, dispatchPackets, dispatchCaptures, recordConnection, history, historyIndex, loading])
 
   function show(p: LoadedPage, index: number) {
