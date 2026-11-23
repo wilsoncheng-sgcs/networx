@@ -4,6 +4,7 @@ export const PROTOCOL_COLORS: Record<string, string> = {
   ICMP: '#f97316',  // orange
   HTTP: '#2563eb',  // blue
   DNS:  '#9333ea',  // purple
+  DHCP: '#65a30d',  // lime
   TCP:  '#0891b2',  // cyan
   UDP:  '#d97706',  // amber
   TLS:  '#4f46e5',  // indigo

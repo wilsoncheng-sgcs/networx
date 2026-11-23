@@ -89,7 +89,15 @@ export default function Terminal({ nodeId, onClose }: Props) {
       // Detect SSH connection signal
       const sshSignal = result.find((l) => l.text.startsWith('\x1bSSH:'))
       if (sshSignal) {
-        setSshNodeId(sshSignal.text.slice(5))
+        // Enter the session when the last packet of the handshake arrives (control+C cancels it)
+        const enter = () => setSshNodeId(sshSignal.text.slice(5))
+        if (sshSignal.delayMs) {
+          const timer = setTimeout(() => {
+            enter()
+            timersRef.current = timersRef.current.filter((t) => t !== timer)
+          }, sshSignal.delayMs)
+          timersRef.current.push(timer)
+        } else enter()
       }
       // Print lines now, or when their packet arrives
       const toPrint = result.filter((l) => !l.text.startsWith('\x1b'))

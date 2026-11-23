@@ -129,7 +129,7 @@ export type AnimSpeed = 0.5 | 1 | 3 | 'instant'
 
 /** Application protocol of a captured packet; null for pure TCP control segments (SYN etc.). */
 export type AppProtocol =
-  | 'DNS' | 'HTTP' | 'TLS' | 'FTP' | 'FTP-DATA' | 'SSH' | 'SMTP' | 'POP3' | 'IMAP' | 'ICMP' | 'ARP' | null
+  | 'DNS' | 'DHCP' | 'HTTP' | 'TLS' | 'FTP' | 'FTP-DATA' | 'SSH' | 'SMTP' | 'POP3' | 'IMAP' | 'ICMP' | 'ARP' | null
 
 export interface CaptureRecord {
   no: number

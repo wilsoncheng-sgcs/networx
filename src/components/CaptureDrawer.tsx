@@ -5,7 +5,7 @@ import type { CaptureRecord } from '../types'
 import { cipherHex, cipherLength } from '../simulation/exchange'
 import { protocolTint, PROTOCOL_COLORS } from './protocolColors'
 
-const FILTERS = ['All', 'DNS', 'TCP', 'HTTP', 'TLS', 'FTP', 'SSH', 'SMTP', 'POP3', 'IMAP', 'ICMP', 'ARP'] as const
+const FILTERS = ['All', 'DNS', 'DHCP', 'TCP', 'HTTP', 'TLS', 'FTP', 'SSH', 'SMTP', 'POP3', 'IMAP', 'ICMP', 'ARP'] as const
 type Filter = typeof FILTERS[number]
 
 /** Teacher-only plaintext reveal: present only with ?teacher=1 in the URL. */

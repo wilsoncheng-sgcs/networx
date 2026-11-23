@@ -202,3 +202,43 @@ describe('SMTP relay on port 25', () => {
     expect(text).toContain('554 5.4.4')
   })
 })
+
+describe('DHCP capture records', () => {
+  it('dhclient adds DISCOVER, OFFER, REQUEST, ACK over UDP 68 ⇄ 67', () => {
+    const { captures } = run('patient', 'dhclient')
+    const dhcp = captures.filter((c) => c.app === 'DHCP')
+    expect(dhcp.map((c) => c.info.split(' - ')[0])).toEqual(['DHCP Discover', 'DHCP Offer', 'DHCP Request', 'DHCP ACK'])
+    expect(dhcp.every((c) => c.transport === 'UDP' && !c.encrypted)).toBe(true)
+    const [discover, offer] = dhcp
+    expect(discover).toMatchObject({ srcIp: '0.0.0.0', srcPort: 68, dstIp: '255.255.255.255', dstPort: 67, dstMac: 'ff:ff:ff:ff:ff:ff' })
+    expect(offer).toMatchObject({ srcIp: '192.168.1.1', srcPort: 67, dstPort: 68 })
+    expect(offer!.payload).toContain('router (default gateway): 192.168.1.1')
+    // One transaction ID for all four
+    expect(new Set(dhcp.map((c) => c.info.split('Transaction ID ')[1])).size).toBe(1)
+  })
+})
+
+describe('ssh capture records', () => {
+  it('ssh to a server: TCP to 22, readable banners and key exchange, then encrypted', () => {
+    const { captures, lines } = run('reception', 'ssh 203.0.113.21')
+    const tcp = tcpRecords(captures)
+    expect(tcp.every((c) => c.dstPort === 22 || c.srcPort === 22)).toBe(true)
+    expect(tcp.slice(0, 3).map((c) => c.tcpFlags)).toEqual(['SYN', 'SYN, ACK', 'ACK'])
+    const ssh = tcp.filter((c) => c.app === 'SSH')
+    expect(ssh[0]!.payload).toBe('SSH-2.0-OpenSSH_9.6')
+    const kexReply = ssh.findIndex((c) => c.info.includes('Key Exchange Reply'))
+    expect(ssh.slice(0, kexReply + 1).every((c) => !c.encrypted)).toBe(true)
+    expect(ssh.slice(kexReply + 1).length).toBeGreaterThan(0)
+    expect(ssh.slice(kexReply + 1).every((c) => c.encrypted)).toBe(true)
+    // Still enters the SSH session, once the last packet arrives
+    expect(lines.some((l) => l.text === '\x1bSSH:ccfile')).toBe(true)
+  })
+
+  it('ssh to a server with SSH off: SYN, RST', () => {
+    const net = careConnect()
+    net.nodes.find((n) => n.id === 'ccfile')!.data.services = { ssh: false }
+    const { captures, text } = run('reception', 'ssh 203.0.113.21', net)
+    expect(tcpRecords(captures).map((c) => c.tcpFlags)).toEqual(['SYN', 'RST, ACK'])
+    expect(text).toContain('ssh: connect to host 203.0.113.21 port 22: Connection refused')
+  })
+})

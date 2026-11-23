@@ -4,9 +4,9 @@ import { type TermContext, type Lines, out, err, info, self, delayLines } from '
 import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
 import { resolveTarget, isResolveError, isIp, dnsServerFor, type Resolution } from './resolve'
 import { tokenize } from './tokenize'
-import { dnsConversation, runConversations, hostKeyFingerprint } from './exchange'
+import { dnsConversation, runConversations, hostKeyFingerprint, newConversation, tcpOpen, tcpRefused } from './exchange'
 import { cmdCurl } from './protocols/web'
-import { cmdFtp, cmdSftp } from './protocols/files'
+import { cmdFtp, cmdSftp, sshHandshake, sshEncrypted } from './protocols/files'
 import { cmdPop3, cmdImap, cmdSmtp, cmdMail } from './protocols/mail'
 import { cmdSs, cmdNetstat } from './protocols/ports'
 import { isListening, servicesFor } from './services'
@@ -286,28 +286,42 @@ function cmdSsh(args: string[], ctx: TermContext): Lines {
   if (!target) return [err('Usage: ssh <ip-address>')]
   const dst = nodeByIp(target, ctx.nodes)
   if (!dst) return [err(`ssh: connect to host ${target}: No route to host`)]
+  const src = self(ctx)
+  const path = findPath(src.id, dst.id, ctx.nodes, ctx.edges)
+  if (!path) return [err(`ssh: connect to host ${target}: Network unreachable`)]
   // Servers run SSH as a service (Services tab); clients and routers accept it as before
   const sshAsService = servicesFor(dst.data.deviceType).some((s) => s.id === 'ssh')
   const accepts = sshAsService
     ? isListening(dst, 'ssh')
     : ['pc', 'laptop', 'router', 'gateway'].includes(dst.data.deviceType)
   if (!accepts) {
-    return [err(`ssh: connect to host ${target} port 22: Connection refused`)]
+    const refused = tcpRefused()
+    refused[1]!.lines = [err(`ssh: connect to host ${target} port 22: Connection refused`)]
+    return runConversations([{ conv: newConversation(src.id, dst.id, target, 22, refused), path }], ctx).lines
   }
-  const src = self(ctx)
-  const path = findPath(src.id, dst.id, ctx.nodes, ctx.edges)
-  if (!path) return [err(`ssh: connect to host ${target}: Network unreachable`)]
-  ctx.dispatchPackets?.(makePacketsWithArp(src, dst, path, ctx, 'TCP', 'SSH'))
-  return [
-    out(`Connecting to ${target} (${dst.data.label})...`),
-    out(`The authenticity of host '${target}' can't be established.`),
-    out(`ED25519 key fingerprint is SHA256:${hostKeyFingerprint(dst.id)}.`),
-    out(`Warning: Permanently added '${target}' (ED25519) to the list of known hosts.`),
-    info(`Connected to ${dst.data.label} (${target}). Type 'exit' to disconnect.`),
-    // Signal to Terminal component to enter SSH session mode
-    { type: 'output' as const, text: `\x1bSSH:${dst.id}` },
+
+  // TCP to port 22, banners and key exchange in the clear, then everything encrypted
+  const open = tcpOpen()
+  open[0]!.lines = [out(`Connecting to ${target} (${dst.data.label})...`)]
+  const steps = [
+    ...open,
+    ...sshHandshake(target, target, hostKeyFingerprint(dst.id)),
+    sshEncrypted('c2s', '🔒 auth', 'User authentication: user name and password'),
+    sshEncrypted('s2c', '🔒 OK', 'Authentication successful'),
+    sshEncrypted('c2s', '🔒 shell', 'Open a session channel and start a shell'),
+    sshEncrypted('s2c', '🔒 shell', 'Channel open: shell started', [
+      info(`Connected to ${dst.data.label} (${target}). Type 'exit' to disconnect.`),
+      // Signal to Terminal component to enter SSH session mode
+      { type: 'output' as const, text: `\x1bSSH:${dst.id}` },
+    ]),
   ]
+  return runConversations([{ conv: newConversation(src.id, dst.id, target, 22, steps), path }], ctx).lines
 }
+
+/** DHCP's ports: the server listens on UDP 67, the client on UDP 68. */
+export const DHCP_SERVER_PORT = 67
+export const DHCP_CLIENT_PORT = 68
+const LEASE_SECONDS = 86400
 
 function cmdDhclient(_args: string[], ctx: TermContext): Lines {
   const src = self(ctx)
@@ -341,7 +355,7 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
       return [err('dhclient: No IPs available in DHCP pool — all addresses in use.')]
     }
 
-    // Build 4-way DHCP handshake animation: DISCOVER → OFFER → REQUEST → ACK
+    // 4-way DHCP exchange: DISCOVER → OFFER → REQUEST → ACK, over UDP 68 ⇄ 67
     const legMs = (path.length - 1) * scaledHop(HOP_MS)
     const dhcpPackets: PacketAnim[] = [
       ...leg(path, ctx.edges, 'UDP', 'DISCOVER', 0),               // client → router
@@ -350,26 +364,71 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
       ...leg(path, ctx.edges, 'UDP', 'ACK',      3 * legMs, true), // router → client
     ]
     ctx.dispatchPackets?.(dhcpPackets)
+    ctx.dispatchCaptures?.(dhcpCaptures(src.data.mac, router, assignedIp, `${prefix}.1`, path, ctx, legMs))
 
-    // Update the node's IP address
-    ctx.updateNodeData?.(src.id, {
+    // Update the node's IP address when the ACK arrives
+    const ackMs = 4 * legMs
+    const apply = () => ctx.updateNodeData?.(src.id, {
       ip: assignedIp,
       gateway: `${prefix}.1`,
       subnet: '255.255.255.0',
     })
+    if (ctx.schedule) ctx.schedule(ackMs, apply)
+    else apply()
 
     return [
       info('DHCP DISCOVER sent (broadcast)…'),
-      info(`DHCP OFFER received from ${router.data.ip}: ${assignedIp}`),
-      info('DHCP REQUEST sent…'),
-      info(`DHCP ACK — lease granted.`),
-      out(''),
-      out(`inet ${assignedIp}/24 brd ${prefix}.255 scope global dynamic eth0`),
-      out(`   valid_lft 86400sec preferred_lft 86400sec`),
+      { ...info(`DHCP OFFER received from ${router.data.ip}: ${assignedIp}`), delayMs: 2 * legMs },
+      { ...info('DHCP REQUEST sent…'), delayMs: 2 * legMs },
+      { ...info(`DHCP ACK — lease granted.`), delayMs: ackMs },
+      { ...out(''), delayMs: ackMs },
+      { ...out(`inet ${assignedIp}/24 brd ${prefix}.255 scope global dynamic eth0`), delayMs: ackMs },
+      { ...out(`   valid_lft ${LEASE_SECONDS}sec preferred_lft ${LEASE_SECONDS}sec`), delayMs: ackMs },
+      { ...info('ⓘ DHCP runs over UDP: the client sends from port 68 to port 67. It has no address yet, so it sends from 0.0.0.0 to the broadcast address 255.255.255.255.'), delayMs: ackMs },
     ]
   }
 
   return [err('dhclient: No DHCP server found. Is a router with DHCP enabled connected to this network?')]
+}
+
+/**
+ * Capture records for DISCOVER, OFFER, REQUEST, ACK. The client has no address yet, so it sends
+ * from 0.0.0.0 to 255.255.255.255 (and MAC ff:ff:ff:ff:ff:ff); the server answers the offered address.
+ */
+function dhcpCaptures(
+  clientMac: string,
+  router: { data: { ip: string; mac: string } },
+  offered: string,
+  gateway: string,
+  path: string[],
+  ctx: TermContext,
+  legMs: number,
+): PendingCapture[] {
+  const xid = `0x${(parseInt(clientMac.replace(/[^0-9a-f]/gi, '').slice(-8) || '1', 16) >>> 0).toString(16).padStart(8, '0')}`
+  const toClient = firstHopMacs([...path].reverse(), ctx.nodes)
+  const conversationId = `dhcp-${Date.now().toString(36)}`
+  const base = { conversationId, transport: 'UDP' as const, app: 'DHCP' as const, encrypted: false }
+  const length = (payload: string) => new TextEncoder().encode(payload).length + 20 + 8
+  const rec = (i: number, c2s: boolean, kind: string, payload: string): PendingCapture => ({
+    ...base,
+    delayMs: i * legMs,
+    stepIndex: i,
+    srcIp: c2s ? '0.0.0.0' : router.data.ip,
+    srcPort: c2s ? DHCP_CLIENT_PORT : DHCP_SERVER_PORT,
+    dstIp: c2s ? '255.255.255.255' : offered,
+    dstPort: c2s ? DHCP_SERVER_PORT : DHCP_CLIENT_PORT,
+    srcMac: c2s ? clientMac : toClient.srcMac,
+    dstMac: c2s ? 'ff:ff:ff:ff:ff:ff' : clientMac,
+    info: `DHCP ${kind} - Transaction ID ${xid}`,
+    payload,
+    length: length(payload),
+  })
+  return [
+    rec(0, true, 'Discover', `DHCP Discover\n  client MAC: ${clientMac}\n  asks: any DHCP server, please offer me an address`),
+    rec(1, false, 'Offer', `DHCP Offer\n  your address: ${offered}\n  subnet mask: 255.255.255.0\n  router (default gateway): ${gateway}\n  lease time: ${LEASE_SECONDS} s\n  DHCP server: ${router.data.ip}`),
+    rec(2, true, 'Request', `DHCP Request\n  requested address: ${offered}\n  DHCP server: ${router.data.ip}`),
+    rec(3, false, 'ACK', `DHCP ACK\n  your address: ${offered}\n  lease time: ${LEASE_SECONDS} s`),
+  ]
 }
 
 function cmdHelp(): Lines {
