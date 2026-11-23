@@ -32,21 +32,21 @@ A **Wide Area Network (WAN)** covers a large geographic area. The Internet is th
     level: 'Both',
     tags: ['protocols', 'layers', 'TCP', 'IP'],
     summary: 'TCP/IP is the 4-layer model used to describe how data travels across the internet.',
-    body: `The **TCP/IP model** has 4 layers, each responsible for different aspects of communication:
+    body: `The **TCP/IP model** has 4 layers, each responsible for different aspects of communication. Networx names them rather than numbering them, so they don't clash with the 7 OSI layers (OSI's Layer 7 is Application):
 
-**4. Application Layer**
+**Application Layer** (OSI 5–7)
 Protocols that applications use directly: HTTP, HTTPS, FTP, SMTP, DNS.
 Data is created and formatted here.
 
-**3. Transport Layer**
+**Transport Layer** (OSI 4)
 TCP (reliable, ordered, checked) or UDP (fast, unreliable).
 Splits data into **segments**, adds port numbers.
 
-**2. Internet Layer**
+**Internet Layer** (OSI 3)
 IP addressing and routing. Data becomes **packets** with source/destination IP.
 Routers operate at this layer.
 
-**1. Link Layer**
+**Link Layer** (OSI 1–2)
 Physical transmission: Ethernet, Wi-Fi, Bluetooth.
 Data becomes **frames** with MAC addresses.
 
@@ -245,7 +245,7 @@ The gateway also runs a DHCP server that automatically assigns IP addresses, sub
     level: 'Both',
     tags: ['switch', 'MAC address', 'MAC table', 'VLAN'],
     summary: 'Switches connect devices within a LAN using MAC addresses to forward frames to the correct port.',
-    body: `A **switch** operates at the **Link Layer (Layer 1)** of the TCP/IP model and forwards Ethernet frames based on **MAC addresses**.
+    body: `A **switch** operates at the **Link Layer** of the TCP/IP model (OSI layers 1–2) and forwards Ethernet frames based on **MAC addresses**.
 
 **MAC address table (CAM table):**
 - The switch learns MAC addresses by observing which port each frame comes from

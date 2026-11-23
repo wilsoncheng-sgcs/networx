@@ -8,14 +8,19 @@ import { findPath, nodeByIp, nodeById, sameSubnet } from './network'
 export const HOP_MS = 500
 
 let animSpeed: AnimSpeed = 1
+let stepping = false
 
 /** Set by the store whenever the toolbar Speed control changes. */
 export function setAnimSpeed(speed: AnimSpeed): void { animSpeed = speed }
 export function getAnimSpeed(): AnimSpeed { return animSpeed }
 
+/** Step mode needs packets to watch, so Instant plays at Fast while it is on. */
+export function setStepping(on: boolean): void { stepping = on }
+
 /** A base per-hop time scaled by the current speed (0 when Instant). */
 export function scaledHop(baseMs: number): number {
-  return animSpeed === 'instant' ? 0 : baseMs / animSpeed
+  if (animSpeed === 'instant') return stepping ? baseMs / 3 : 0
+  return baseMs / animSpeed
 }
 
 let packetSequence = 0
@@ -212,11 +217,11 @@ export function arpBefore(
   const convId = `arp-${nextBatchId()}`
   const base = { conversationId: convId, transport: 'ARP' as const, app: 'ARP' as const, encrypted: false, length: 28 }
   const captures: PendingCapture[] = [
-    { ...base, stepIndex: 0, delayMs: startMs,
+    { ...base, stepIndex: 0, delayMs: startMs, route: arpPath,
       srcIp: src.data.ip, dstIp: arpTarget.data.ip,
       srcMac: src.data.mac, dstMac: 'ff:ff:ff:ff:ff:ff',
       info: `Who has ${arpTarget.data.ip}? Tell ${src.data.ip}` },
-    { ...base, stepIndex: 1, delayMs: startMs + legMs,
+    { ...base, stepIndex: 1, delayMs: startMs + legMs, route: [...arpPath].reverse(),
       srcIp: arpTarget.data.ip, dstIp: src.data.ip,
       srcMac: arpTarget.data.mac, dstMac: src.data.mac,
       info: `${arpTarget.data.ip} is at ${arpTarget.data.mac}` },

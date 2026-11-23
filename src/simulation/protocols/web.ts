@@ -3,8 +3,8 @@ import { type TermContext, type Lines, out, err, info, self } from '../context'
 import { resolveTarget, isResolveError, isIp } from '../resolve'
 import { isListening } from '../services'
 import {
-  type Step, type CertInfo, type Leg,
-  newConversation, tcpOpen, tcpRefused, tcpClose, tlsHandshake, certificateFor, formatCertDate,
+  type Step, type CertInfo, type CertProblem, type Leg,
+  newConversation, tcpOpen, tcpRefused, tcpClose, tlsHandshake, tlsRejected, certificateFor, certProblem, formatCertDate,
   dnsConversation, runConversations, pathTo, byteLength,
 } from '../exchange'
 
@@ -38,16 +38,22 @@ export function parseUrl(raw: string): ParsedUrl | null {
 export const CURL_USER_AGENT = 'curl/8.7.1'
 export const BROWSER_USER_AGENT = 'Mozilla/5.0 (Networx Browser)'
 
-export function httpRequestHeaders(host: string, path: string, userAgent = CURL_USER_AGENT): string[] {
+export type HttpMethod = 'GET' | 'HEAD'
+
+export function httpRequestHeaders(host: string, path: string, userAgent = CURL_USER_AGENT, method: HttpMethod = 'GET'): string[] {
   return [
-    `GET ${path} HTTP/1.1`,
+    `${method} ${path} HTTP/1.1`,
     `Host: ${host}`,
     `User-Agent: ${userAgent}`,
     `Accept: ${userAgent === CURL_USER_AGENT ? '*/*' : 'text/html'}`,
   ]
 }
 
-export function httpResponseHeaders(body: string): string[] {
+/** Status line and headers. With `redirectTo`: 301 Moved Permanently and a Location header, no body. */
+export function httpResponseHeaders(body: string, redirectTo?: string): string[] {
+  if (redirectTo) {
+    return ['HTTP/1.1 301 Moved Permanently', `Location: ${redirectTo}`, 'Content-Length: 0']
+  }
   return [
     'HTTP/1.1 200 OK',
     'Content-Type: text/html; charset=utf-8',
@@ -55,19 +61,35 @@ export function httpResponseHeaders(body: string): string[] {
   ]
 }
 
-/** One HTTP request and its 200 OK. With `tls`, the same bytes travel inside TLS (encrypted on the wire). */
-export function httpExchange(host: string, path: string, body: string, tls = false, userAgent = CURL_USER_AGENT): Step[] {
-  const request = httpRequestHeaders(host, path, userAgent).join('\n')
-  const response = [...httpResponseHeaders(body), '', body].join('\n')
+export interface HttpOptions {
+  method?: HttpMethod
+  /** The server redirects this request (HTTP → HTTPS). */
+  redirectTo?: string
+}
+
+/**
+ * One HTTP request and its response. With `tls`, the same bytes travel inside TLS (encrypted on the wire).
+ * HEAD and 301 responses carry headers only.
+ */
+export function httpExchange(host: string, path: string, body: string, tls = false, userAgent = CURL_USER_AGENT, opts: HttpOptions = {}): Step[] {
+  const { method = 'GET', redirectTo } = opts
+  const request = httpRequestHeaders(host, path, userAgent, method).join('\n')
+  const headers = httpResponseHeaders(body, redirectTo)
+  const response = method === 'HEAD' || redirectTo ? headers.join('\n') : [...headers, '', body].join('\n')
+  const status = headers[0]!.replace('HTTP/1.1 ', '')
+  const short = redirectTo ? '301 Moved' : status
   if (tls) {
     return [
-      { dir: 'c2s', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'TLS', label: '🔒 GET', info: 'Application Data', payload: request, encrypted: true },
-      { dir: 's2c', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'TLS', label: '🔒 200 OK', info: 'Application Data', payload: response, encrypted: true },
+      { dir: 'c2s', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'TLS', label: `🔒 ${method}`, info: 'Application Data', payload: request, encrypted: true },
+      { dir: 's2c', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'TLS', label: `🔒 ${short}`.slice(0, 14), info: 'Application Data', payload: response, encrypted: true },
     ]
   }
+  const responseInfo = redirectTo
+    ? `HTTP/1.1 301 Moved Permanently  (Location: ${redirectTo})`
+    : `HTTP/1.1 ${status}${method === 'HEAD' ? '' : '  (text/html)'}`
   return [
-    { dir: 'c2s', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'HTTP', label: `GET ${path}`.slice(0, 14), info: `GET ${path} HTTP/1.1`, payload: request },
-    { dir: 's2c', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'HTTP', label: '200 OK', info: 'HTTP/1.1 200 OK  (text/html)', payload: response },
+    { dir: 'c2s', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'HTTP', label: `${method} ${path}`.slice(0, 14), info: `${method} ${path} HTTP/1.1`, payload: request },
+    { dir: 's2c', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'HTTP', label: short, info: responseInfo, payload: response },
   ]
 }
 
@@ -91,7 +113,7 @@ export function pageFor(server: NetNode, host: string, ip: string): string {
 
 // ── Fetching a URL (shared by curl and the browser) ─────────────────────────
 
-export type WebFailure = 'bad-url' | 'nxdomain' | 'no-dns' | 'no-route' | 'refused'
+export type WebFailure = 'bad-url' | 'nxdomain' | 'no-dns' | 'no-route' | 'refused' | 'cert'
 
 export interface WebResult {
   ok: boolean
@@ -100,6 +122,10 @@ export interface WebResult {
   ip?: string
   body?: string
   cert?: CertInfo
+  /** The server answered 301: where it points (the browser follows it). */
+  redirect?: string
+  /** Set when the certificate failed the check (whether or not `insecure` let the request go on). */
+  problem?: CertProblem
   lines: TerminalLine[]
   /** When the last packet arrives (ms): the browser shows the page then. */
   endMs: number
@@ -107,13 +133,17 @@ export interface WebResult {
 
 interface FetchOptions {
   verbose?: boolean
+  /** curl -k: carry on when the certificate fails the check. */
+  insecure?: boolean
+  /** curl -I: send HEAD and print only the response headers. */
+  head?: boolean
   userAgent?: string
   /** curl prints lines; the browser plays the same Conversations silently. */
   withLines?: boolean
 }
 
 export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {}): WebResult {
-  const { verbose = false, userAgent = CURL_USER_AGENT, withLines = true } = opts
+  const { verbose = false, insecure = false, head = false, userAgent = CURL_USER_AGENT, withLines = true } = opts
   const url = parseUrl(raw)
   if (!url) return { ok: false, url: null, failure: 'bad-url', lines: [err(`curl: (3) URL rejected: Bad hostname`)], endMs: 0 }
   const { host, port, scheme, path } = url
@@ -171,7 +201,8 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
 
   // 3. TCP, (TLS), HTTP, close
   const body = pageFor(server, host, r.ip)
-  const cert = tls ? certificateFor(host) : undefined
+  const cert = tls ? certificateFor(host, server.data.certificate ?? 'valid') : undefined
+  const problem = cert ? certProblem(cert, host) ?? undefined : undefined
   const conv = newConversation(ctx.selfId, server.id, r.ip, port, [])
 
   const open = tcpOpen()
@@ -179,17 +210,36 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
     ...v(info(`ⓘ TCP three-way handshake: SYN → SYN-ACK → ACK (your port ${conv.clientPort} → server port ${port})`)),
     ...v(out(`* Connected to ${host} (${r.ip}) port ${port}`)),
   ]
+  const helloLines = [
+    ...v(out('* TLS handshake, Client hello (1):')),
+    ...v(info(`ⓘ The Client hello names the site (${host}) in plain text.`)),
+  ]
+  const serverHelloLines = [
+    ...v(out('* TLS handshake, Server hello (2):')),
+    ...v(out('* TLS handshake, Certificate (11):')),
+  ]
+
+  // The certificate fails the check: the client sends an alert and hangs up (spec §3.3)
+  if (cert && problem && !insecure) {
+    const rejected = tlsRejected(host, cert, problem.verify)
+    rejected[0]!.lines = helloLines
+    rejected[1]!.lines = [
+      ...serverHelloLines,
+      ...v(out(`* ${problem.curl.replace(/^curl: \(60\) /, '')}`)),
+      ...v(out('* Closing connection')),
+      ...L(err(problem.curl)),
+      ...L(info(`ⓘ ${problem.explain}`)),
+    ]
+    conv.steps = [...open, ...rejected, ...tcpClose()]
+    legs.push({ conv, path: path2 })
+    const run = runConversations(legs, ctx)
+    return { ok: false, url, failure: 'cert', ip: r.ip, cert, problem, lines: [...immediate, ...run.lines], endMs: run.endMs }
+  }
 
   const handshake = cert ? tlsHandshake(host, cert) : []
   if (cert) {
-    handshake[0]!.lines = [
-      ...v(out('* TLS handshake, Client hello (1):')),
-      ...v(info(`ⓘ The Client hello names the site (${host}) in plain text.`)),
-    ]
-    handshake[1]!.lines = [
-      ...v(out('* TLS handshake, Server hello (2):')),
-      ...v(out('* TLS handshake, Certificate (11):')),
-    ]
+    handshake[0]!.lines = helloLines
+    handshake[1]!.lines = serverHelloLines
     handshake[2]!.lines = [
       ...v(out('* TLS handshake, Finished (20):')),
       ...v(out('* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384')),
@@ -199,22 +249,36 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
       ...v(out(`*  start date: ${formatCertDate(cert.start)}`)),
       ...v(out(`*  expire date: ${formatCertDate(cert.expire)}`)),
       ...v(out(`*  issuer: ${cert.issuer}`)),
-      ...v(out('*  SSL certificate verify ok.')),
+      ...(problem
+        ? [
+            ...v(out(`*  SSL certificate verify result: ${problem.verify}, continuing anyway.`)),
+            ...L(info(`ⓘ -k skipped the certificate check. ${problem.explain} The connection is still encrypted, but you can't be sure who is on the other end.`)),
+          ]
+        : v(out('*  SSL certificate verify ok.'))),
     ]
   }
 
-  const http = httpExchange(host, path, body, tls, userAgent)
+  const method: HttpMethod = head ? 'HEAD' : 'GET'
+  const redirectTo = !tls && server.data.deviceType === 'web' && server.data.redirectHttp
+    ? `https://${host}${path}`
+    : undefined
+  const http = httpExchange(host, path, body, tls, userAgent, { method, redirectTo })
+  const responseHeaders = httpResponseHeaders(body, redirectTo)
   http[0]!.lines = [
-    ...httpRequestHeaders(host, path, userAgent).flatMap((h) => v(out(`> ${h}`))),
+    ...httpRequestHeaders(host, path, userAgent, method).flatMap((h) => v(out(`> ${h}`))),
     ...v(out('>')),
     ...v(info(tls
       ? 'ⓘ Everything from here is encrypted on the wire. Open the packet capture to compare.'
       : 'ⓘ Everything you see below also crossed the network in plain text.')),
   ]
   http[1]!.lines = [
-    ...httpResponseHeaders(body).flatMap((h) => v(out(`< ${h}`))),
+    // -v shows the headers as `< …`; -I alone prints them plain, the way curl does
+    ...responseHeaders.flatMap((h) => (verbose ? v(out(`< ${h}`)) : head ? L(out(h)) : [])),
     ...v(out('<')),
-    ...(withLines ? body.split('\n').map((line) => out(line)) : []),
+    ...(withLines && !head && !redirectTo ? body.split('\n').map((line) => out(line)) : []),
+    ...(redirectTo
+      ? L(info(`ⓘ 301 Moved Permanently: the server says to use ${redirectTo} instead. curl stops here; a browser follows the redirect by itself. This first request still crossed the network in plain text.`))
+      : []),
   ]
 
   const close = tcpClose()
@@ -223,20 +287,45 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
   conv.steps = [...open, ...handshake, ...http, ...close]
   legs.push({ conv, path: path2 })
   const run = runConversations(legs, ctx)
-  return { ok: true, url, ip: r.ip, body, cert, lines: [...immediate, ...run.lines], endMs: run.endMs }
+  return { ok: true, url, ip: r.ip, body, cert, problem, redirect: redirectTo, lines: [...immediate, ...run.lines], endMs: run.endMs }
 }
 
 // ── curl ─────────────────────────────────────────────────────────────────────
+
+export interface CurlFlags {
+  verbose: boolean
+  insecure: boolean
+  head: boolean
+  unknown: string[]
+}
+
+/** curl's flags: -v, -k, -I, combined (-vk) or long (--verbose, --insecure, --head). */
+export function parseCurlFlags(flags: string[]): CurlFlags {
+  const f: CurlFlags = { verbose: false, insecure: false, head: false, unknown: [] }
+  const long: Record<string, keyof Omit<CurlFlags, 'unknown'>> = { '--verbose': 'verbose', '--insecure': 'insecure', '--head': 'head' }
+  const short: Record<string, keyof Omit<CurlFlags, 'unknown'>> = { v: 'verbose', k: 'insecure', I: 'head' }
+  for (const flag of flags) {
+    if (flag.startsWith('--')) {
+      const key = long[flag]
+      if (key) f[key] = true
+      else f.unknown.push(flag)
+      continue
+    }
+    const letters = flag.slice(1).split('')
+    if (letters.length && letters.every((c) => short[c])) letters.forEach((c) => { f[short[c]!] = true })
+    else f.unknown.push(flag)
+  }
+  return f
+}
 
 export function cmdCurl(args: string[], ctx: TermContext, plain = false): Lines {
   const flags = plain ? [] : args.filter((a) => a.startsWith('-'))
   const rest = args.filter((a) => plain || !a.startsWith('-'))
   const url = rest[0]
-  if (!url) return [err(plain ? 'Usage: wget <url>' : 'Usage: curl [-v] <url>   e.g. curl -v https://www.careconnect.example')]
-  const verbose = flags.some((f) => /^-[a-zA-Z]*v/.test(f) || f === '--verbose')
-  const unsupported = flags.filter((f) => !/^-[a-zA-Z]*v[a-zA-Z]*$/.test(f) && f !== '--verbose')
-  const notes: Lines = unsupported.length
-    ? [info(`ⓘ ${unsupported.join(' ')} is not available in Networx yet; ignoring.`)]
+  if (!url) return [err(plain ? 'Usage: wget <url>' : 'Usage: curl [-v] [-k] [-I] <url>   e.g. curl -v https://www.careconnect.example')]
+  const f = parseCurlFlags(flags)
+  const notes: Lines = f.unknown.length
+    ? [info(`ⓘ ${f.unknown.join(' ')} is not available in Networx; ignoring.`)]
     : []
-  return [...notes, ...fetchUrl(url, ctx, { verbose }).lines]
+  return [...notes, ...fetchUrl(url, ctx, { verbose: f.verbose, insecure: f.insecure, head: f.head }).lines]
 }

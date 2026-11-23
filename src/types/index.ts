@@ -129,7 +129,7 @@ export type AnimSpeed = 0.5 | 1 | 3 | 'instant'
 
 /** Application protocol of a captured packet; null for pure TCP control segments (SYN etc.). */
 export type AppProtocol =
-  | 'DNS' | 'HTTP' | 'TLS' | 'FTP' | 'FTP-DATA' | 'SSH' | 'SMTP' | 'POP3' | 'IMAP' | 'ICMP' | 'ARP' | null
+  | 'DNS' | 'DHCP' | 'HTTP' | 'TLS' | 'FTP' | 'FTP-DATA' | 'SSH' | 'SMTP' | 'POP3' | 'IMAP' | 'ICMP' | 'ARP' | null
 
 export interface CaptureRecord {
   no: number
@@ -137,7 +137,9 @@ export interface CaptureRecord {
   conversationId: string
   stepIndex: number
   srcIp: string; srcPort?: number; dstIp: string; dstPort?: number
-  srcMac: string; dstMac: string          // first hop of the leg
+  srcMac: string; dstMac: string          // first hop of the leg (or the tapped link's)
+  route?: string[]                        // node ids in the order this packet travels (for tapping a link)
+  tapped?: boolean                        // recorded on a tapped link: the MACs are that link's
   transport: 'TCP' | 'UDP' | 'ICMP' | 'ARP'
   tcpFlags?: string
   app: AppProtocol

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { Radio } from 'lucide-react'
 import { BaseEdge, EdgeLabelRenderer, getBezierPath } from '@xyflow/react'
 import type { EdgeProps } from '@xyflow/react'
 import { useNetworkStore } from '../store'
@@ -57,6 +58,8 @@ export default function DeletableEdge({
 }: EdgeProps) {
   const onEdgesChange = useNetworkStore((s) => s.onEdgesChange)
   const activePackets = useNetworkStore((s) => s.activePackets)
+  const tapped = useNetworkStore((s) => s.tapEdgeId === id)
+  const setTap = useNetworkStore((s) => s.setTap)
 
   const [edgePath, labelX, labelY] = getBezierPath({
     sourceX, sourceY, sourcePosition,
@@ -65,6 +68,11 @@ export default function DeletableEdge({
 
   const myPackets = activePackets.filter((p) => p.edgeId === id)
 
+  function toggleTap(e: React.MouseEvent) {
+    e.stopPropagation()
+    setTap(tapped ? null : id)
+  }
+
   function handleDelete(e: React.MouseEvent) {
     e.stopPropagation()
     onEdgesChange([{ type: 'remove', id }])
@@ -72,6 +80,10 @@ export default function DeletableEdge({
 
   return (
     <>
+      {tapped && (
+        // A wide pale halo marks the tapped link
+        <path d={edgePath} fill="none" stroke="#dc2626" strokeOpacity={0.25} strokeWidth={10} strokeLinecap="round" />
+      )}
       <BaseEdge id={id} path={edgePath} style={style} markerEnd={markerEnd} />
 
       <EdgeLabelRenderer>
@@ -84,12 +96,28 @@ export default function DeletableEdge({
             display: 'flex',
             alignItems: 'center',
             gap: '4px',
+            // A selected or tapped link's buttons sit above the devices, even where the line passes under one
+            zIndex: selected || tapped ? 2000 : undefined,
           }}
         >
           {label && (
             <span className="text-xs bg-white/90 px-1.5 py-0.5 rounded border border-indigo-200 text-indigo-500 font-medium shadow-sm">
               {label as string}
             </span>
+          )}
+          {(selected || tapped) && (
+            <button
+              onClick={toggleTap}
+              className={`h-5 px-1.5 rounded-full border text-[10px] font-semibold flex items-center gap-1 shadow-sm transition-colors ${
+                tapped
+                  ? 'bg-red-600 border-red-600 text-white hover:bg-red-700'
+                  : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+              }`}
+              title={tapped ? 'Stop tapping: capture every packet again' : 'Capture only the packets that cross this link'}
+              data-testid="tap-link"
+            >
+              <Radio size={10} /> {tapped ? 'Tapped' : 'Tap this link'}
+            </button>
           )}
           {selected && (
             <button

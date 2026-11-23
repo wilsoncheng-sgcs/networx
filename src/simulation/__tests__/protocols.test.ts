@@ -82,7 +82,7 @@ describe('web', () => {
   })
 
   it('the demo certificate is dated relative to today', () => {
-    const c = certificateFor('h', new Date(Date.UTC(2026, 10, 23, 9)))
+    const c = certificateFor('h', 'valid', new Date(Date.UTC(2026, 10, 23, 9)))
     expect(formatCertDate(c.start)).toBe('Sep 24 00:00:00 2026 GMT')
     expect(formatCertDate(c.expire)).toBe('Sep 19 23:59:59 2027 GMT')
   })
@@ -240,15 +240,13 @@ describe('mail', () => {
     expect(auth.note).toBe('Base64 decodes to: \\0reception@careconnect.example\\0Front2026!')
   })
 
-  it('smtp delivers to a local mailbox and refuses relaying', () => {
+  it('smtp delivers to a local mailbox', () => {
     const net = careConnect()
     const { text } = run('reception', 'smtp reception@careconnect.example dr.nguyen@careconnect.example "Patient arrived"', net)
     expect(text).toContain('250 OK queued')
     const box = net.nodes.find((n) => n.id === 'ccmail')!.data.mailboxes!.find((b) => b.address.startsWith('dr.nguyen'))!
     expect(box.messages).toHaveLength(3)
     expect(box.messages[2]).toMatchObject({ subject: 'Patient arrived', seen: false, body: 'This message was sent from Networx.' })
-    const relay = run('reception', 'smtp reception@careconnect.example someone@elsewhere.example "x"', net)
-    expect(relay.text).toContain('550 relay not permitted in Networx')
   })
 
   it('--tls hides the password: no Base64 note, all application steps encrypted', () => {

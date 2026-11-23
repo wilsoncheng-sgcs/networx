@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { X, Plus, Trash2, Power, RotateCcw } from 'lucide-react'
 import { useNetworkStore } from '../store'
-import type { FirewallRule, DnsRecord, StoredFile, Mailbox, NetNode } from '../types'
+import type { FirewallRule, DnsRecord, StoredFile, Mailbox, NetNode, CertificateState } from '../types'
 import { DEFAULT_ACCOUNT, defaultMailboxes } from '../simulation/defaults'
 import { PRESETS } from '../simulation/presets'
 import { servicesFor, isListening } from '../simulation/services'
@@ -428,6 +428,46 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
               })}
             </div>
             {!data.isOn && <p className="text-xs text-red-500 mt-2">This device is offline, so nothing is listening.</p>}
+
+            {(isWeb || isMail) && (
+              <div className="mt-4 space-y-2">
+                <h3 className="text-sm font-semibold text-gray-700">TLS certificate</h3>
+                <select
+                  className="w-full border border-gray-200 rounded-md px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-blue-300"
+                  value={data.certificate ?? 'valid'}
+                  onChange={(e) => upd({ certificate: e.target.value as CertificateState })}
+                  data-testid="certificate-select"
+                >
+                  <option value="valid">Valid (issued by Networx Demo CA)</option>
+                  <option value="self-signed">Self-signed</option>
+                  <option value="expired">Expired</option>
+                  <option value="wrong-name">Wrong name (issued to another site)</option>
+                </select>
+                <p className="text-xs text-gray-400">
+                  Used for {isWeb ? 'HTTPS' : 'the --tls ports'}. Clients refuse a certificate that fails the check
+                  ({isWeb ? <>try <code className="bg-gray-100 px-1 rounded font-mono">curl -v https://…</code>, then <code className="bg-gray-100 px-1 rounded font-mono">-k</code></> : 'the session stops before the password is sent'}).
+                </p>
+              </div>
+            )}
+
+            {isWeb && (
+              <label className="mt-3 flex items-start gap-2 bg-gray-50 rounded-lg px-2.5 py-2 cursor-pointer hover:bg-gray-100">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={!!data.redirectHttp}
+                  onChange={(e) => upd({ redirectHttp: e.target.checked })}
+                  data-testid="redirect-http"
+                />
+                <div className="min-w-0">
+                  <div className="text-sm text-gray-800 font-semibold">Redirect HTTP to HTTPS</div>
+                  <div className="text-xs text-gray-500 leading-snug">
+                    Answer every http:// request with <span className="font-mono">301 Moved Permanently</span> pointing at https://.
+                    The first request still crosses the network in plain text.
+                  </div>
+                </div>
+              </label>
+            )}
           </div>
         )}
 

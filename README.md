@@ -61,7 +61,14 @@ DNS, FTP, SFTP, SSL, TLS, SMTP, POP3, IMAP”* (SE-12-03). It adds:
 - **Services tab** on servers, `ss` and a real `netstat`
 - **Animation speed** control and terminal output timed to the packets (control+C stops it)
 - **CareConnect** preset (fictional clinic on `careconnect.example`) for the lesson's labs
-- Vitest unit tests: `npm run test`
+- **Certificates** — valid, self-signed, expired or wrong-name per server: `curl` fails with error 60 (`-k` carries
+  on), the browser shows *Your connection is not private*
+- **HTTP → HTTPS redirect** (`301 Moved Permanently`) and **`curl -I`** (headers only)
+- **SMTP relay** from mail server to mail server on port 25
+- **Tap a link** — capture only what crosses one connection, with that link's MAC addresses
+- **Step mode** — pause before each packet of a conversation; Next or the space bar plays it
+- **Layer labels** by name (Application, Internet, Link) with the OSI equivalent, and DHCP/SSH capture records
+- Vitest unit tests: `npm run test`; headless acceptance run: `npm run acceptance` (with `npm run preview` running)
 
 The original copyright and MIT licence are unchanged.
 

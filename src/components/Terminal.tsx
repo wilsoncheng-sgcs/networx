@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { X, Minus } from 'lucide-react'
+import * as clock from '../simulation/clock'
 import { useNetworkStore } from '../store'
 import { runCommand } from '../simulation/terminal'
 import type { TerminalLine } from '../types'
@@ -25,15 +26,17 @@ export default function Terminal({ nodeId, onClose }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   // Lines still waiting to print (timed with the packet animation)
-  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const timersRef = useRef<number[]>([])
   const [pending, setPending] = useState(0)
 
   const sshNode = sshNodeId ? nodes.find((n) => n.id === sshNodeId) : null
   const lines: TerminalLine[] = node?.data.termHistory ?? []
 
   const cancelPending = useCallback(() => {
-    timersRef.current.forEach(clearTimeout)
+    timersRef.current.forEach(clock.cancel)
     timersRef.current = []
+    // Step mode: nothing left of this command to step through
+    clock.clearBreakpoints()
     setPending(0)
   }, [])
 
@@ -78,7 +81,7 @@ export default function Terminal({ nodeId, onClose }: Props) {
       selfId: sshNodeId ?? nodeId,
       nodes, edges, learnMac, learnArp, dispatchPackets, updateNodeData,
       dispatchCaptures, recordConnection,
-      schedule: (ms, fn) => { setTimeout(fn, ms) },
+      schedule: (ms, fn) => { clock.after(ms, fn) },
       recentConnections: recentConns[sshNodeId ?? nodeId] ?? [],
     })
 
@@ -89,7 +92,15 @@ export default function Terminal({ nodeId, onClose }: Props) {
       // Detect SSH connection signal
       const sshSignal = result.find((l) => l.text.startsWith('\x1bSSH:'))
       if (sshSignal) {
-        setSshNodeId(sshSignal.text.slice(5))
+        // Enter the session when the last packet of the handshake arrives (control+C cancels it)
+        const enter = () => setSshNodeId(sshSignal.text.slice(5))
+        if (sshSignal.delayMs) {
+          const timer = clock.after(sshSignal.delayMs, () => {
+            enter()
+            timersRef.current = timersRef.current.filter((t) => t !== timer)
+          })
+          timersRef.current.push(timer)
+        } else enter()
       }
       // Print lines now, or when their packet arrives
       const toPrint = result.filter((l) => !l.text.startsWith('\x1b'))
@@ -101,11 +112,11 @@ export default function Terminal({ nodeId, onClose }: Props) {
       if (later.length) {
         setPending(later.length)
         later.forEach((line) => {
-          const timer = setTimeout(() => {
+          const timer = clock.after(line.delayMs!, () => {
             appendTermLine(nodeId, stripDelay(line))
             timersRef.current = timersRef.current.filter((t) => t !== timer)
             setPending((n) => Math.max(0, n - 1))
-          }, line.delayMs)
+          })
           timersRef.current.push(timer)
         })
       }

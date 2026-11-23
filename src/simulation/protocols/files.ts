@@ -152,6 +152,37 @@ export interface SftpOptions {
 
 export const SSH_VERSION = 'SSH-2.0-OpenSSH_9.6'
 
+/** An SSH packet after the key exchange: only ciphertext on the wire. */
+export function sshEncrypted(dir: 'c2s' | 's2c', label: string, payload: string, lines?: Lines): Step {
+  return {
+    dir, transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'SSH', label,
+    info: dir === 'c2s' ? 'Client: Encrypted packet' : 'Server: Encrypted packet',
+    payload, encrypted: true, lines,
+  }
+}
+
+/**
+ * The readable start of every SSH connection: both version banners, then the key exchange.
+ * The KEX reply carries the server's host key; the terminal prints its fingerprint when it arrives.
+ */
+export function sshHandshake(host: string, ip: string, fingerprint: string): Step[] {
+  return [
+    c2s('SSH', 'SSH-2.0', SSH_VERSION, `Client: Protocol (${SSH_VERSION})`),
+    s2c('SSH', 'SSH-2.0', SSH_VERSION, `Server: Protocol (${SSH_VERSION})`),
+    c2s('SSH', 'KEXINIT', 'Key exchange: agreeing algorithms (list of supported methods)', 'Client: Key Exchange Init'),
+    s2c('SSH', 'KEXINIT', 'Key exchange: agreeing algorithms (list of supported methods)', 'Server: Key Exchange Init'),
+    c2s('SSH', 'KEX init', "Key exchange: the client's public value", 'Client: Elliptic Curve Diffie-Hellman Key Exchange Init'),
+    s2c('SSH', 'KEX reply', `Key exchange: the server's public value\nServer host key (public): ssh-ed25519\nHost key fingerprint: SHA256:${fingerprint}`,
+      'Server: Elliptic Curve Diffie-Hellman Key Exchange Reply, New Keys', {
+        lines: [
+          out(`The authenticity of host '${host === ip ? host : `${host} (${ip})`}' can't be established.`),
+          out(`ED25519 key fingerprint is SHA256:${fingerprint}.`),
+          out(`Warning: Permanently added '${host}' (ED25519) to the list of known hosts.`),
+        ],
+      }),
+  ]
+}
+
 /**
  * SFTP inside SSH (port 22). Version banners and the key exchange are readable;
  * everything after it — the password included — is encrypted.
@@ -159,26 +190,10 @@ export const SSH_VERSION = 'SSH-2.0-OpenSSH_9.6'
 export function sftpSession(o: SftpOptions): Step[] {
   const home = `/home/${o.user}`
   const file = o.action.cmd === 'get' ? o.files.find((f) => f.name === (o.action as { file: string }).file) : undefined
-  const enc = (dir: 'c2s' | 's2c', label: string, payload: string, lines?: Lines): Step => ({
-    dir, transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'SSH', label,
-    info: dir === 'c2s' ? 'Client: Encrypted packet' : 'Server: Encrypted packet',
-    payload, encrypted: true, lines,
-  })
+  const enc = sshEncrypted
 
   const steps: Step[] = [
-    c2s('SSH', 'SSH-2.0', SSH_VERSION, `Client: Protocol (${SSH_VERSION})`),
-    s2c('SSH', 'SSH-2.0', SSH_VERSION, `Server: Protocol (${SSH_VERSION})`),
-    c2s('SSH', 'KEXINIT', 'Key exchange: agreeing algorithms (list of supported methods)', 'Client: Key Exchange Init'),
-    s2c('SSH', 'KEXINIT', 'Key exchange: agreeing algorithms (list of supported methods)', 'Server: Key Exchange Init'),
-    c2s('SSH', 'KEX init', "Key exchange: the client's public value", 'Client: Elliptic Curve Diffie-Hellman Key Exchange Init'),
-    s2c('SSH', 'KEX reply', `Key exchange: the server's public value\nServer host key (public): ssh-ed25519\nHost key fingerprint: SHA256:${o.fingerprint}`,
-      'Server: Elliptic Curve Diffie-Hellman Key Exchange Reply, New Keys', {
-        lines: [
-          out(`The authenticity of host '${o.host} (${o.ip})' can't be established.`),
-          out(`ED25519 key fingerprint is SHA256:${o.fingerprint}.`),
-          out(`Warning: Permanently added '${o.host}' to the list of known hosts.`),
-        ],
-      }),
+    ...sshHandshake(o.host, o.ip, o.fingerprint),
     enc('c2s', '🔒 auth', `user ${o.user}, password ${o.password}`, [out(`${o.user}@${o.host}'s password: ********`)]),
     enc('s2c', '🔒 OK', 'Authentication successful', [out(`Connected to ${o.host}.`)]),
   ]

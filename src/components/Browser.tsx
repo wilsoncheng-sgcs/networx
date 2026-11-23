@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { ArrowLeft, ArrowRight, RotateCw, Globe, X, Lock } from 'lucide-react'
+import { ArrowLeft, ArrowRight, RotateCw, Globe, X, Lock, ShieldAlert } from 'lucide-react'
 import { useNetworkStore } from '../store'
+import * as clock from '../simulation/clock'
 import { fetchUrl, parseUrl, BROWSER_USER_AGENT } from '../simulation/protocols/web'
 
 interface Props {
@@ -18,8 +19,10 @@ interface LoadedPage {
 
 interface LoadError {
   url: string
-  kind: 'refused' | 'unresolved' | 'unreachable'
+  kind: 'refused' | 'unresolved' | 'unreachable' | 'cert'
   message: string
+  host?: string
+  code?: string
 }
 
 export default function Browser({ nodeId }: Props) {
@@ -32,13 +35,13 @@ export default function Browser({ nodeId }: Props) {
   const [loading, setLoading] = useState<string | null>(null)
   const [showSecurity, setShowSecurity] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
-  const loadTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const loadTimer = useRef<number | null>(null)
 
-  useEffect(() => () => { if (loadTimer.current) clearTimeout(loadTimer.current) }, [])
+  useEffect(() => () => { if (loadTimer.current) clock.cancel(loadTimer.current) }, [])
 
-  const navigate = useCallback((rawUrl: string, pushHistory = true) => {
+  const navigate = useCallback((rawUrl: string, pushHistory = true, redirects = 0) => {
     const raw = rawUrl.trim()
-    if (!raw || loading) return
+    if (!raw || (loading && redirects === 0)) return
     const parsed = parseUrl(raw)
     setShowSecurity(false)
     if (!parsed) {
@@ -55,9 +58,14 @@ export default function Browser({ nodeId }: Props) {
 
     setLoading(parsed.host)
     setError(null)
-    if (loadTimer.current) clearTimeout(loadTimer.current)
+    if (loadTimer.current) clock.cancel(loadTimer.current)
     // Show the page when its last packet arrives
-    loadTimer.current = setTimeout(() => {
+    loadTimer.current = clock.after(result.endMs, () => {
+      // 301 Moved Permanently: a browser follows the Location header by itself
+      if (result.ok && result.redirect && redirects < 5) {
+        navigate(result.redirect, pushHistory, redirects + 1)
+        return
+      }
       setLoading(null)
       if (!result.ok) {
         setPage(null)
@@ -68,6 +76,9 @@ export default function Browser({ nodeId }: Props) {
             break
           case 'nxdomain':
             setError({ url: parsed.href, kind: 'unresolved', message: `${host}'s server IP address could not be found.\n\nThe DNS server answered: no such name (NXDOMAIN). Check the spelling, or the DNS server's A records.\n\nDNS_PROBE_FINISHED_NXDOMAIN` })
+            break
+          case 'cert':
+            setError({ url: parsed.href, kind: 'cert', host, code: result.problem?.browserCode, message: result.problem?.explain ?? 'The certificate failed the check.' })
             break
           case 'no-dns':
             setError({ url: parsed.href, kind: 'unresolved', message: `${host} could not be resolved.\n\nNo DNS server is reachable from this device.` })
@@ -93,7 +104,7 @@ export default function Browser({ nodeId }: Props) {
         setHistory(next)
         setHistoryIndex(next.length - 1)
       }
-    }, result.endMs)
+    })
   }, [nodeId, nodes, edges, learnMac, learnArp, dispatchPackets, dispatchCaptures, recordConnection, history, historyIndex, loading])
 
   function show(p: LoadedPage, index: number) {
@@ -148,7 +159,11 @@ export default function Browser({ nodeId }: Props) {
 
         {/* Address bar */}
         <div className="flex-1 flex items-center gap-1.5 bg-gray-100 border border-gray-200 rounded-full px-2.5 py-1 focus-within:border-blue-400 focus-within:bg-white transition-colors min-w-0">
-          {page && !editing ? (
+          {error?.kind === 'cert' && addressInput === error.url ? (
+            <span className="flex items-center gap-1 text-[11px] text-red-600 font-medium flex-shrink-0 border-r border-gray-300 pr-1.5" data-testid="cert-error-chip">
+              <ShieldAlert size={11} /> Not secure
+            </span>
+          ) : page && !editing ? (
             page.secure ? (
               <button
                 className="flex items-center gap-0.5 text-gray-700 hover:bg-gray-200 rounded-full px-1 flex-shrink-0"
@@ -237,7 +252,24 @@ export default function Browser({ nodeId }: Props) {
           <div className="h-full flex items-center justify-center text-xs text-gray-400">Waiting for {loading}…</div>
         )}
 
-        {error && !loading && (
+        {error && !loading && error.kind === 'cert' && (
+          <div className="h-full overflow-auto bg-red-50 p-8" data-testid="cert-warning">
+            <div className="max-w-sm mx-auto">
+              <ShieldAlert size={40} className="text-red-600 mb-4" />
+              <h2 className="text-lg font-semibold text-gray-800 mb-2">Your connection is not private</h2>
+              <p className="text-xs text-gray-600 leading-relaxed mb-3">
+                The browser stopped before loading <strong>{error.host}</strong>: its certificate failed the check, so it
+                can't prove it is really {error.host}. Someone could be pretending to be this site to read what you send.
+              </p>
+              <p className="text-xs text-gray-700 leading-relaxed bg-white border border-red-200 rounded-md p-2.5 mb-3" data-testid="cert-reason">
+                {error.message}
+              </p>
+              <p className="font-mono text-[11px] text-gray-500">{error.code}</p>
+            </div>
+          </div>
+        )}
+
+        {error && !loading && error.kind !== 'cert' && (
           <div className="h-full flex items-center justify-center p-8" data-testid="browser-error">
             <div className="text-center max-w-sm">
               <div className="text-4xl mb-4">🔌</div>

@@ -1,4 +1,4 @@
-import type { TerminalLine, PacketAnim, PendingCapture, AppProtocol, NetNode } from '../types'
+import type { TerminalLine, PacketAnim, PendingCapture, AppProtocol, NetNode, CertificateState } from '../types'
 import type { TermContext } from './context'
 import { findPath, nodeById } from './network'
 import { arpBefore, firstHopMacs, leg, populateMacTables, scaledHop } from './packets'
@@ -119,18 +119,72 @@ export interface CertInfo {
   issuer: string
   start: Date
   expire: Date
+  state: CertificateState
 }
 
 const DAY_MS = 86_400_000
 
-/** A valid demo certificate, dated relative to today so it never goes stale. */
-export function certificateFor(hostname: string, today = new Date()): CertInfo {
+/** The name a `wrong-name` certificate was issued for: a reserved example domain, so it is clearly someone else's. */
+export const WRONG_CERT_NAME = 'www.example.org'
+
+/**
+ * A demo certificate, dated relative to today so it never goes stale.
+ * - valid: issued to the host by Networx Demo CA, from today − 60 days to today + 300 days
+ * - self-signed: issuer = subject (the server signed its own certificate)
+ * - expired: from today − 425 days to today − 60 days
+ * - wrong-name: valid, but issued to another site
+ */
+export function certificateFor(hostname: string, state: CertificateState = 'valid', today = new Date()): CertInfo {
   const midnight = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
+  const endOfDay = (days: number) => new Date(midnight + days * DAY_MS + DAY_MS - 1000)
+  const subject = `CN=${state === 'wrong-name' ? WRONG_CERT_NAME : hostname}`
+  const expired = state === 'expired'
   return {
-    subject: `CN=${hostname}`,
-    issuer: 'CN=Networx Demo CA',
-    start: new Date(midnight - 60 * DAY_MS),
-    expire: new Date(midnight + 300 * DAY_MS + DAY_MS - 1000),
+    subject,
+    issuer: state === 'self-signed' ? subject : 'CN=Networx Demo CA',
+    start: new Date(midnight - (expired ? 425 : 60) * DAY_MS),
+    expire: endOfDay(expired ? -60 : 300),
+    state,
+  }
+}
+
+export interface CertProblem {
+  /** curl's error line, e.g. `curl: (60) SSL certificate problem: self-signed certificate`. */
+  curl: string
+  /** The verification result in a few words, for `-k` and for the mail commands. */
+  verify: string
+  /** Chrome's error code, shown on the warning page. */
+  browserCode: string
+  /** Plain-language reason, for the warning page and an ⓘ line. */
+  explain: string
+}
+
+/** What a client finds wrong with a certificate, or null when it checks out. */
+export function certProblem(cert: CertInfo, host: string): CertProblem | null {
+  switch (cert.state) {
+    case 'self-signed':
+      return {
+        curl: 'curl: (60) SSL certificate problem: self-signed certificate',
+        verify: 'self-signed certificate',
+        browserCode: 'NET::ERR_CERT_AUTHORITY_INVALID',
+        explain: `The certificate was signed by the server itself (issuer = subject = ${cert.subject}), so no trusted certificate authority vouches for it.`,
+      }
+    case 'expired':
+      return {
+        curl: 'curl: (60) SSL certificate problem: certificate has expired',
+        verify: 'certificate has expired',
+        browserCode: 'NET::ERR_CERT_DATE_INVALID',
+        explain: `The certificate expired on ${formatCertDate(cert.expire)}. An expired certificate is no longer trusted.`,
+      }
+    case 'wrong-name':
+      return {
+        curl: `curl: (60) SSL: no alternative certificate subject name matches target host name '${host}'`,
+        verify: `certificate subject name does not match target host name '${host}'`,
+        browserCode: 'NET::ERR_CERT_COMMON_NAME_INVALID',
+        explain: `The certificate was issued to ${cert.subject.replace(/^CN=/, '')}, not ${host}. It could belong to a different server.`,
+      }
+    default:
+      return null
   }
 }
 
@@ -157,6 +211,22 @@ export function tlsHandshake(serverName: string, cert: CertInfo): Step[] {
     { dir: 'c2s', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'TLS', label: '🔒 Finished',
       info: 'Change Cipher Spec, Application Data',
       payload: 'Finished (client handshake complete)',
+      encrypted: true },
+  ]
+}
+
+/**
+ * The client rejects the certificate: ClientHello, ServerHello (the certificate is in its encrypted part),
+ * then the client's alert. In TLS 1.3 the alert is encrypted too, so a capture shows only Application Data.
+ */
+export function tlsRejected(serverName: string, cert: CertInfo, reason: string): Step[] {
+  const [hello, serverHello] = tlsHandshake(serverName, cert)
+  return [
+    hello!,
+    serverHello!,
+    { dir: 'c2s', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'TLS', label: '🔒 Alert',
+      info: 'Application Data',
+      payload: `Alert (fatal): certificate rejected — ${reason}`,
       encrypted: true },
   ]
 }
@@ -264,14 +334,15 @@ export function playConversation(
   const captures: PendingCapture[] = [...arp.captures]
   const lines: TerminalLine[] = []
   const c2sMacs = firstHopMacs(path, ctx.nodes)
-  const s2cMacs = firstHopMacs([...path].reverse(), ctx.nodes)
+  const reversed = [...path].reverse()
+  const s2cMacs = firstHopMacs(reversed, ctx.nodes)
   const clientIp = client?.data.ip ?? ''
 
   let t = arp.endMs
   conv.steps.forEach((step, i) => {
     const back = step.dir === 's2c'
     packets.push(...leg(path, ctx.edges, animProtocol(step), step.label, t, back, hop))
-    captures.push(captureFor(conv, step, i, t, clientIp, back ? s2cMacs : c2sMacs))
+    captures.push({ ...captureFor(conv, step, i, t, clientIp, back ? s2cMacs : c2sMacs), route: back ? reversed : path })
     const end = t + legMs
     for (const line of step.lines ?? []) lines.push({ ...line, delayMs: end + (line.delayMs ?? 0) })
     t = end

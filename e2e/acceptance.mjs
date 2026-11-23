@@ -32,7 +32,7 @@ page.on('pageerror', (e) => consoleErrors.push(`${current}: ${e.message}`))
 const aside = () => page.locator('aside').last()
 const termOut = () => page.getByTestId('terminal-output')
 const termIn = () => page.getByTestId('terminal-input')
-const rows = () => page.locator('[data-testid=capture-table] tbody tr')
+const rows = () => page.locator('[data-testid=capture-table] tbody tr[data-no]')
 
 async function scenario(n, title, fn) {
   current = `${n}. ${title}`
@@ -254,7 +254,7 @@ await scenario(6, 'Reception PC: sftp get', async () => {
   }
   check('password appears nowhere in the capture (every row opened)', !leaked)
   await page.getByTestId('capture-search').fill('Clinic2026')
-  check('search for the password finds nothing', (await rows().count()) === 1 && (await rows().first().innerText()).includes('No packets match'))
+  check('search for the password finds nothing', (await rows().count()) === 0 && (await page.getByTestId('capture-table').innerText()).includes('No packets match'))
   await page.getByTestId('capture-search').fill('')
   await rows().filter({ hasText: '🔒 Client: Encrypted packet' }).first().click()
   await shot('06-sftp')
@@ -414,6 +414,235 @@ await scenario(12, 'Reload and import an export from the live site', async () =>
     await shot('12-imported')
   }
   await loadCareConnect()
+})
+
+// ── Phase 2 ─────────────────────────────────────────────────────────────────
+
+async function setCertificate(state) {
+  await selectNode('CareConnect Web')
+  await openTab('Services')
+  await page.getByTestId('certificate-select').selectOption(state)
+}
+
+async function browse(url) {
+  await openTab('Browser')
+  const addr = page.getByTestId('browser-address')
+  await addr.fill(url)
+  await addr.press('Enter')
+  return addr
+}
+
+await scenario(14, 'Certificate states, curl -k and the browser warning', async () => {
+  if (!(await page.getByTestId('capture-drawer').isVisible().catch(() => false))) await page.getByTestId('capture-toggle').click()
+  await setSpeed('3')
+  await setCertificate('self-signed')
+  await shot('14a-certificate-setting')
+  await terminalOn("Patient's Laptop")
+  await clearTerm(); await clearCapture()
+  await cmd('curl -v https://www.careconnect.example')
+  let o = await output()
+  check('self-signed: curl (60)', o.includes('curl: (60) SSL certificate problem: self-signed certificate'))
+  check('self-signed: no page', !o.includes('<!DOCTYPE html>'))
+  await page.waitForTimeout(300)
+  const tls = (await rowTexts()).map(cols).filter((x) => x.proto === 'TLS')
+  check('capture: ClientHello, ServerHello, then an encrypted alert — no GET',
+    tls.length === 3 && tls[0].info.startsWith('Client Hello') && tls[2].info.startsWith('🔒'), tls.map((x) => x.info).join(' | '))
+  await shot('14b-curl-self-signed')
+
+  await clearTerm()
+  await cmd('curl -vk https://www.careconnect.example')
+  o = await output()
+  check('-k: continuing anyway, and the page', o.includes('SSL certificate verify result: self-signed certificate, continuing anyway.') && o.includes('<!DOCTYPE html>'))
+  check('-k: ⓘ explains what was skipped', o.includes('ⓘ -k skipped the certificate check'))
+  await shot('14c-curl-k')
+
+  await browse('https://www.careconnect.example')
+  await page.getByTestId('cert-warning').waitFor({ timeout: 30000 })
+  const warning = await page.getByTestId('cert-warning').innerText()
+  check('browser: "Your connection is not private"', warning.includes('Your connection is not private'))
+  check('browser: reason and NET::ERR_CERT_AUTHORITY_INVALID', warning.includes('signed by the server itself') && warning.includes('NET::ERR_CERT_AUTHORITY_INVALID'))
+  check('browser: no way to proceed', (await page.getByTestId('cert-warning').getByRole('button').count()) === 0)
+  check('browser: red Not secure chip', await page.getByTestId('cert-error-chip').isVisible())
+  await shot('14d-browser-warning')
+
+  for (const [state, expected] of [
+    ['expired', 'curl: (60) SSL certificate problem: certificate has expired'],
+    ['wrong-name', "curl: (60) SSL: no alternative certificate subject name matches target host name 'www.careconnect.example'"],
+  ]) {
+    await setCertificate(state)
+    await terminalOn("Patient's Laptop")
+    await clearTerm()
+    await cmd('curl https://www.careconnect.example')
+    check(`${state}: ${expected.slice(0, 48)}…`, (await output()).includes(expected))
+  }
+  await setCertificate('valid')
+})
+
+await scenario(15, 'HTTP → HTTPS redirect and curl -I', async () => {
+  await selectNode('CareConnect Web')
+  await openTab('Services')
+  await page.getByTestId('redirect-http').check()
+  await terminalOn("Patient's Laptop")
+  await clearTerm(); await clearCapture()
+  await cmd('curl -v http://www.careconnect.example')
+  let o = await output()
+  check('301 Moved Permanently with Location', o.includes('< HTTP/1.1 301 Moved Permanently') && o.includes('< Location: https://www.careconnect.example/'))
+  await page.waitForTimeout(300)
+  check('capture: the 301 is readable', (await rowTexts()).some((t) => t.includes('301 Moved Permanently') && !t.includes('🔒')))
+  await shot('15a-curl-301')
+
+  await clearTerm()
+  await cmd('curl -I http://www.careconnect.example')
+  o = await output()
+  check('curl -I: headers only, with Location', o.includes('Location: https://www.careconnect.example/') && !o.includes('<!DOCTYPE html>'))
+
+  const addr = await browse('http://www.careconnect.example')
+  await page.getByTestId('secure-chip').waitFor({ timeout: 40000 })
+  check('browser follows the redirect to https://', (await addr.inputValue()).startsWith('https://'))
+  await shot('15b-browser-redirected')
+
+  await selectNode('CareConnect Web')
+  await openTab('Services')
+  await page.getByTestId('redirect-http').uncheck()
+  await terminalOn("Patient's Laptop")
+  await clearTerm()
+  await cmd('curl -I https://www.careconnect.example')
+  o = await output()
+  check('curl -I https: 200 OK headers, no body', o.includes('HTTP/1.1 200 OK') && o.includes('Content-Length:') && !o.includes('<!DOCTYPE html>'))
+  await shot('15c-curl-I')
+})
+
+await scenario(16, 'SMTP relay on port 25', async () => {
+  await terminalOn('Reception PC')
+  await clearTerm(); await clearCapture()
+  await cmd('smtp reception@careconnect.example referrals@gp-clinic.example "Referral"')
+  const o = await output()
+  check('accepted (250 OK queued)', o.includes('250 OK queued'))
+  check("ⓘ passes the message on, port 25", o.includes("ⓘ Your server passes the message to the recipient's server on port 25."))
+  await page.waitForTimeout(300)
+  await filter('SMTP')
+  const relay = (await rowTexts()).map(cols).filter((x) => x.dst.endsWith(':25') || x.src.endsWith(':25'))
+  check('capture: relay rows from the mail server (203.0.113.25) to port 25', relay.length > 0 && relay.some((x) => x.src.startsWith('203.0.113.25:') && x.dst.endsWith(':25')))
+  check('capture: the relayed message is readable', relay.some((x) => x.info.startsWith('Message:') && !x.info.includes('🔒')))
+  await shot('16-smtp-relay')
+  await filter('All')
+})
+
+await scenario(17, 'DHCP and ssh in the capture', async () => {
+  await terminalOn("Patient's Laptop")
+  await clearTerm(); await clearCapture()
+  await cmd('dhclient')
+  await page.waitForTimeout(300)
+  await filter('DHCP')
+  const dhcp = (await rowTexts()).map(cols)
+  check('DHCP: Discover, Offer, Request, ACK', dhcp.length === 4 && ['Discover', 'Offer', 'Request', 'ACK'].every((k, i) => dhcp[i].info.includes(`DHCP ${k}`)), dhcp.map((x) => x.info).join(' | '))
+  check('DHCP: 0.0.0.0:68 → 255.255.255.255:67', dhcp[0]?.src === '0.0.0.0:68' && dhcp[0]?.dst === '255.255.255.255:67')
+  await shot('17a-dhcp')
+  await filter('All')
+
+  await terminalOn('Reception PC')
+  await clearTerm(); await clearCapture()
+  await cmd('ssh 203.0.113.21')
+  await page.waitForTimeout(300)
+  await filter('SSH')
+  const ssh = (await rowTexts()).map(cols)
+  const kex = ssh.findIndex((x) => x.info.includes('Key Exchange Reply'))
+  check('ssh: banners and key exchange readable', kex > 0 && ssh.slice(0, kex + 1).every((x) => !x.info.startsWith('🔒')))
+  check('ssh: everything after is encrypted', ssh.slice(kex + 1).length > 0 && ssh.slice(kex + 1).every((x) => x.info.startsWith('🔒')))
+  check('ssh: still enters the session', (await page.locator('aside').last().innerText()).includes('SSH → File Server'))
+  await shot('17b-ssh')
+  await cmd('exit')
+  await filter('All')
+})
+
+await scenario(18, 'Layer labels by name', async () => {
+  await page.getByRole('button', { name: 'Layers' }).click()
+  const labels = page.getByTestId('layer-label')
+  const texts = await labels.allInnerTexts()
+  check('labels are names, not numbers', texts.includes('Application') && texts.includes('Link') && texts.includes('Internet') && !texts.some((t) => /^L\d/.test(t)), [...new Set(texts)].join(', '))
+  const title = await labels.filter({ hasText: /^Application$/ }).first().getAttribute('title')
+  check('tooltip gives the OSI equivalent', title?.includes('OSI layers 5–7'), title ?? '')
+  await shot('18-layer-labels')
+  await page.getByRole('button', { name: 'Layers' }).click()
+})
+
+async function tapEdge(edgeId) {
+  // Close the side panel so the whole network is in view
+  await page.locator('.react-flow__pane').click({ position: { x: 10, y: 10 } })
+  await page.waitForTimeout(500)
+  // Click a point on the line itself that no device covers, as a person would
+  const pt = await page.evaluate((id) => {
+    const path = document.querySelector(`[data-testid="rf__edge-${id}"] path.react-flow__edge-path`)
+    for (const f of [0.3, 0.7, 0.2, 0.8, 0.5]) {
+      const p = path.getPointAtLength(path.getTotalLength() * f)
+      const m = path.getScreenCTM()
+      const x = p.x * m.a + p.y * m.c + m.e, y = p.x * m.b + p.y * m.d + m.f
+      if (document.elementFromPoint(x, y)?.closest(`[data-testid="rf__edge-${id}"]`)) return { x, y }
+    }
+    return null
+  }, edgeId)
+  if (!pt) throw new Error(`no clickable point on ${edgeId}`)
+  await page.mouse.click(pt.x, pt.y)
+  await page.getByTestId('tap-link').first().click()
+}
+
+await scenario(19, 'Tap a link', async () => {
+  await clearCapture()
+  await tapEdge('cc-e1')
+  const note = await page.getByTestId('tap-note').innerText()
+  check("drawer note: Tapping: Patient's Laptop ⇄ Home Gateway (Wi-Fi)", note.includes("Tapping: Patient's Laptop ⇄ Home Gateway (Wi-Fi)"), note)
+  await terminalOn('Reception PC')
+  await clearTerm()
+  await cmd('curl http://www.careconnect.example')
+  await page.waitForTimeout(300)
+  check("the clinic's traffic is not on the patient's link", (await rows().count()) === 0, String(await rows().count()))
+  await terminalOn("Patient's Laptop")
+  await clearTerm()
+  await cmd('curl http://www.careconnect.example')
+  await page.waitForTimeout(300)
+  const wifi = await detailOf((t) => cols(t).info.startsWith('GET'))
+  check('on the Wi-Fi link: laptop MAC → home gateway MAC', wifi?.includes('src aa:bb:cc:01:01:01 → dst aa:bb:cc:01:00:01') && wifi?.includes('on the tapped link'), wifi?.split('\n').find((l) => l.includes('Ethernet')))
+  await shot('19a-tap-wifi')
+
+  await page.getByTestId('tap-all').click()
+  await tapEdge('cc-e6')
+  await clearCapture()
+  await terminalOn("Patient's Laptop")
+  await clearTerm()
+  await cmd('curl http://www.careconnect.example')
+  await page.waitForTimeout(300)
+  const lan = await detailOf((t) => cols(t).info.startsWith('GET'))
+  check('on the web server link: router MAC → web server MAC, same IPs', lan?.includes('src aa:bb:cc:02:00:01 → dst aa:bb:cc:02:00:80') && lan?.includes('192.168.1.'), lan?.split('\n').filter((l) => /IPv4|Ethernet/.test(l)).join(' / '))
+  await shot('19b-tap-server-link')
+  await page.getByTestId('tap-all').click()
+  check('Tap: all clears it', !(await page.getByTestId('tap-note').isVisible().catch(() => false)))
+})
+
+await scenario(20, 'Step mode', async () => {
+  await clearCapture()
+  await page.getByTestId('step-toggle').click()
+  await terminalOn("Patient's Laptop")
+  await clearTerm()
+  await termIn().fill('curl http://www.careconnect.example')
+  await termIn().press('Enter')
+  await page.getByTestId('step-label').waitFor({ timeout: 5000 })
+  await page.waitForTimeout(800)
+  check('paused before the first step: nothing captured yet', (await rows().count()) === 0, String(await rows().count()))
+  check('names the next step', (await page.getByTestId('step-label').innerText()).includes('Standard query A www.careconnect.example'))
+  await shot('20a-step-paused')
+  await page.getByTestId('step-next').click()
+  await page.waitForTimeout(1500)
+  check('Next plays one step', (await rows().count()) === 1, String(await rows().count()))
+  // The space bar works when the user isn't typing
+  await page.evaluate(() => (document.activeElement)?.blur())
+  await page.keyboard.press('Space')
+  await page.waitForTimeout(1500)
+  check('space bar plays the next step', (await rows().count()) === 2, String(await rows().count()))
+  check('the terminal waits meanwhile', await termIn().getAttribute('readonly') !== null)
+  await shot('20b-step-next')
+  await page.getByTestId('step-toggle').click()
+  await page.waitForFunction(() => !document.querySelector('[data-testid=terminal-input]')?.hasAttribute('readonly'), null, { timeout: 30000 })
+  check('leaving step mode finishes the command', (await output()).includes('CareConnect'))
 })
 
 await scenario(13, 'Layout at 1280×800 and 1440×900', async () => {

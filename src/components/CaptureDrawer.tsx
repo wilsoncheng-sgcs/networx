@@ -4,8 +4,9 @@ import { useNetworkStore } from '../store'
 import type { CaptureRecord } from '../types'
 import { cipherHex, cipherLength } from '../simulation/exchange'
 import { protocolTint, PROTOCOL_COLORS } from './protocolColors'
+import { tapLabel } from '../simulation/tap'
 
-const FILTERS = ['All', 'DNS', 'TCP', 'HTTP', 'TLS', 'FTP', 'SSH', 'SMTP', 'POP3', 'IMAP', 'ICMP', 'ARP'] as const
+const FILTERS = ['All', 'DNS', 'DHCP', 'TCP', 'HTTP', 'TLS', 'FTP', 'SSH', 'SMTP', 'POP3', 'IMAP', 'ICMP', 'ARP'] as const
 type Filter = typeof FILTERS[number]
 
 /** Teacher-only plaintext reveal: present only with ?teacher=1 in the URL. */
@@ -37,7 +38,8 @@ function endpoint(ip: string, port?: number): string {
 }
 
 export default function CaptureDrawer() {
-  const { captures, clearCaptures, setCaptureOpen } = useNetworkStore()
+  const { captures, clearCaptures, setCaptureOpen, tapEdgeId, setTap, edges, nodes } = useNetworkStore()
+  const tapEdge = tapEdgeId ? edges.find((e) => e.id === tapEdgeId) : undefined
   const [height, setHeight] = useState(260)
   const [filter, setFilter] = useState<Filter>('All')
   const [query, setQuery] = useState('')
@@ -141,9 +143,22 @@ export default function CaptureDrawer() {
           <X size={14} />
         </button>
       </div>
-      <p className="px-3 py-0.5 text-[11px] text-gray-400 border-b border-gray-100 flex-shrink-0">
-        Shows every packet in this network. A real attacker only sees the link they can tap.
-      </p>
+      {tapEdge ? (
+        <p className="px-3 py-0.5 text-[11px] text-red-700 bg-red-50 border-b border-red-100 flex-shrink-0 flex items-center gap-2" data-testid="tap-note">
+          <span>Tapping: <strong>{tapLabel(tapEdge, nodes)}</strong>. Only packets crossing this link are recorded; the MAC addresses are this link's.</span>
+          <button
+            className="ml-auto px-1.5 rounded border border-red-200 bg-white text-red-700 hover:bg-red-100 flex-shrink-0"
+            onClick={() => setTap(null)}
+            data-testid="tap-all"
+          >
+            Tap: all
+          </button>
+        </p>
+      ) : (
+        <p className="px-3 py-0.5 text-[11px] text-gray-400 border-b border-gray-100 flex-shrink-0">
+          Shows every packet in this network. A real attacker only sees the link they can tap: select a connection and choose “Tap this link”.
+        </p>
+      )}
 
       {/* Table */}
       <div ref={tableRef} onScroll={onScroll} className="flex-1 overflow-auto min-h-0">
@@ -271,7 +286,7 @@ function CaptureDetail({ record: r }: { record: CaptureRecord }) {
         </LayerRow>
       )}
       <LayerRow name="Link" osi="1–2">
-        <span className="font-mono">Ethernet/Wi-Fi  src {r.srcMac} → dst {r.dstMac}  (first hop)</span>
+        <span className="font-mono">Ethernet/Wi-Fi  src {r.srcMac} → dst {r.dstMac}  ({r.tapped ? 'on the tapped link' : 'first hop'})</span>
         {r.transport === 'ARP' && <div className="font-mono">ARP {r.info}</div>}
       </LayerRow>
     </div>
