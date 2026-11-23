@@ -1,11 +1,23 @@
 import { create } from 'zustand'
 import { addEdge, applyNodeChanges, applyEdgeChanges } from '@xyflow/react'
 import type { NodeChange, EdgeChange, Connection } from '@xyflow/react'
-import type { NetNode, NetEdge, NodeData, PanelType, RouteEntry, MacEntry, ArpEntry, FirewallRule, DnsRecord, TerminalLine, PacketAnim } from '../types'
+import type { NetNode, NetEdge, NodeData, PanelType, RouteEntry, MacEntry, ArpEntry, FirewallRule, DnsRecord, TerminalLine, PacketAnim, AnimSpeed } from '../types'
+import { setAnimSpeed } from '../simulation/packets'
 import { makeDefaultData, normaliseNode } from '../simulation/defaults'
 import type { Preset } from '../simulation/presets'
 
 const STORAGE_KEY = 'networx-state-v1'
+const SPEED_KEY = 'networx-speed'
+
+function loadSpeed(): AnimSpeed {
+  try {
+    const raw = localStorage.getItem(SPEED_KEY)
+    if (raw === 'instant') return 'instant'
+    const n = Number(raw)
+    if (n === 0.5 || n === 1 || n === 3) return n
+  } catch { /* storage unavailable */ }
+  return 1
+}
 
 let idCounter = 100
 function nextId(prefix: string) { return `${prefix}-${++idCounter}` }
@@ -71,6 +83,10 @@ interface NetworkStore {
   addDnsRecord: (nodeId: string, record: DnsRecord) => void
   removeDnsRecord: (nodeId: string, id: string) => void
 
+  // Animation speed (toolbar). Persisted separately from the network.
+  animSpeed: AnimSpeed
+  setAnimSpeed: (speed: AnimSpeed) => void
+
   // Packet animations
   activePackets: PacketAnim[]
   dispatchPackets: (packets: PacketAnim[]) => void
@@ -82,6 +98,8 @@ interface NetworkStore {
 }
 
 const saved = loadSaved()
+const initialSpeed = loadSpeed()
+setAnimSpeed(initialSpeed)
 
 export const useNetworkStore = create<NetworkStore>((set, get) => ({
   nodes: saved?.nodes ?? [],
@@ -91,6 +109,7 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
   connectionType: 'wired',
   showLayers: false,
   activePackets: [],
+  animSpeed: initialSpeed,
 
   onNodesChange: (changes) =>
     set((s) => ({ nodes: applyNodeChanges(changes, s.nodes) })),
@@ -249,7 +268,15 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
       ),
     })),
 
+  setAnimSpeed: (speed) => {
+    setAnimSpeed(speed)
+    try { localStorage.setItem(SPEED_KEY, String(speed)) } catch { /* storage unavailable */ }
+    set({ animSpeed: speed })
+  },
+
   dispatchPackets: (packets) => {
+    // Instant: nothing animates
+    if (get().animSpeed === 'instant') return
     // Stagger each packet's appearance via setTimeout so animateMotion starts at t=0
     packets.forEach((packet) => {
       setTimeout(() => {

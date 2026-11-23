@@ -4,6 +4,11 @@ import { useNetworkStore } from '../store'
 import { runCommand } from '../simulation/terminal'
 import type { TerminalLine } from '../types'
 
+/** Lines are stored without their timing. */
+function stripDelay(line: TerminalLine): TerminalLine {
+  return { type: line.type, text: line.text }
+}
+
 interface Props {
   nodeId: string
   onClose: () => void
@@ -19,12 +24,24 @@ export default function Terminal({ nodeId, onClose }: Props) {
   const [sshNodeId, setSshNodeId] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  // Lines still waiting to print (timed with the packet animation)
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const [pending, setPending] = useState(0)
 
   const sshNode = sshNodeId ? nodes.find((n) => n.id === sshNodeId) : null
   const lines: TerminalLine[] = node?.data.termHistory ?? []
 
-  // Reset SSH session if the panel is switched to a different node
-  useEffect(() => { setSshNodeId(null) }, [nodeId])
+  const cancelPending = useCallback(() => {
+    timersRef.current.forEach(clearTimeout)
+    timersRef.current = []
+    setPending(0)
+  }, [])
+
+  // Reset SSH session and pending output if the panel is switched to a different node; clear on unmount
+  useEffect(() => {
+    setSshNodeId(null)
+    return () => cancelPending()
+  }, [nodeId, cancelPending])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -35,6 +52,7 @@ export default function Terminal({ nodeId, onClose }: Props) {
   }, [nodeId])
 
   const submit = useCallback(() => {
+    if (pending > 0) return
     if (!input.trim() && input !== '') { setInput(''); return }
     const raw = input.trim()
     if (!raw) return
@@ -70,18 +88,40 @@ export default function Terminal({ nodeId, onClose }: Props) {
       if (sshSignal) {
         setSshNodeId(sshSignal.text.slice(5))
       }
-      // Append all non-signal lines
-      result
-        .filter((l) => !l.text.startsWith('\x1b'))
-        .forEach((line) => appendTermLine(nodeId, line))
+      // Print lines now, or when their packet arrives
+      const toPrint = result.filter((l) => !l.text.startsWith('\x1b'))
+      const later: TerminalLine[] = []
+      for (const line of toPrint) {
+        if (line.delayMs) later.push(line)
+        else appendTermLine(nodeId, stripDelay(line))
+      }
+      if (later.length) {
+        setPending(later.length)
+        later.forEach((line) => {
+          const timer = setTimeout(() => {
+            appendTermLine(nodeId, stripDelay(line))
+            timersRef.current = timersRef.current.filter((t) => t !== timer)
+            setPending((n) => Math.max(0, n - 1))
+          }, line.delayMs)
+          timersRef.current.push(timer)
+        })
+      }
     }
 
     setCmdHistory((h) => [raw, ...h].slice(0, 50))
     setHistIdx(-1)
     setInput('')
-  }, [input, nodeId, nodes, edges, appendTermLine, clearTerm, learnMac, learnArp, dispatchPackets, updateNodeData, sshNodeId, sshNode])
+  }, [input, pending, nodeId, nodes, edges, appendTermLine, clearTerm, learnMac, learnArp, dispatchPackets, updateNodeData, sshNodeId, sshNode])
 
   function handleKeyDown(e: React.KeyboardEvent) {
+    // control+C (the same key on macOS, not ⌘) stops a running command's output
+    if (e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'c' && pending > 0) {
+      e.preventDefault()
+      cancelPending()
+      appendTermLine(nodeId, { type: 'input', text: '^C' })
+      return
+    }
+    if (pending > 0) return
     if (e.key === 'Enter') { submit(); return }
     if (e.key === 'ArrowUp') {
       e.preventDefault()
@@ -162,7 +202,10 @@ export default function Terminal({ nodeId, onClose }: Props) {
           onKeyDown={handleKeyDown}
           spellCheck={false}
           autoComplete="off"
-          placeholder="enter command..."
+          readOnly={pending > 0}
+          aria-disabled={pending > 0}
+          placeholder={pending > 0 ? 'running…  (control+C to stop)' : 'enter command...'}
+          data-testid="terminal-input"
         />
       </div>
     </div>

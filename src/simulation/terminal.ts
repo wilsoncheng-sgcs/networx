@@ -4,6 +4,7 @@ import { type TermContext, type Lines, out, err, info, self, delayLines } from '
 import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter } from './packets'
 import { resolveTarget, isResolveError, isIp, dnsServerFor, type Resolution } from './resolve'
 import { tokenize } from './tokenize'
+import { dnsConversation, runConversations } from './exchange'
 
 export type { TermContext } from './context'
 export { makePackets, makePacketsWithArp, edgesOnPath, finishMs, startAfter } from './packets'
@@ -14,14 +15,8 @@ export { PUBLIC_IPS } from './resolve'
  * Returns when the answer arrives (ms), so later packets and lines can wait for it.
  */
 function animateDns(r: Resolution, ctx: TermContext): number {
-  const src = self(ctx)
-  const dns = r.dnsServerNode
-  if (!dns) return 0
-  const path = findPath(src.id, dns.id, ctx.nodes, ctx.edges)
-  if (!path) return 0
-  const packets = makePacketsWithArp(src, dns, path, ctx, 'DNS', 'DNS', true)
-  ctx.dispatchPackets?.(packets)
-  return finishMs(packets)
+  const dnsLeg = dnsConversation(r, ctx)
+  return dnsLeg ? runConversations([dnsLeg], ctx).endMs : 0
 }
 
 /** The terminal error for a name that didn't resolve. */

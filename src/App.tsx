@@ -12,7 +12,7 @@ import '@xyflow/react/dist/style.css'
 import {
   BookOpen, Cable, Wifi, Trash2, HelpCircle,
   ChevronRight, ChevronLeft, Save, LayoutGrid, Check, X as XIcon,
-  Upload, Layers,
+  Upload, Layers, Gauge,
 } from 'lucide-react'
 
 import { useNetworkStore } from './store'
@@ -24,7 +24,7 @@ import Terminal from './components/Terminal'
 import Browser from './components/Browser'
 import InfoPanel from './components/InfoPanel'
 import { PRESETS } from './simulation/presets'
-import type { DeviceType, NetNode } from './types'
+import type { DeviceType, NetNode, AnimSpeed } from './types'
 
 const nodeTypes = { device: DeviceNode }
 const edgeTypes = { default: DeletableEdge }
@@ -280,6 +280,36 @@ function SaveButton() {
   )
 }
 
+// ─── Animation speed ──────────────────────────────────────────────────────────
+
+const SPEEDS: Array<{ value: AnimSpeed; label: string }> = [
+  { value: 0.5, label: 'Slow' },
+  { value: 1, label: 'Normal' },
+  { value: 3, label: 'Fast' },
+  { value: 'instant', label: 'Instant' },
+]
+
+function SpeedControl() {
+  const { animSpeed, setAnimSpeed } = useNetworkStore()
+  return (
+    <label className="flex items-center gap-1.5 text-sm text-gray-600" title="Packet animation speed (Normal for the projector, Fast for students)">
+      <Gauge size={14} />
+      <span className="sr-only sm:not-sr-only">Speed</span>
+      <select
+        className="border border-gray-200 rounded-md px-1.5 py-1 text-sm bg-white outline-none focus:ring-2 focus:ring-blue-300"
+        value={String(animSpeed)}
+        onChange={(e) => {
+          const v = e.target.value
+          setAnimSpeed(v === 'instant' ? 'instant' : (Number(v) as AnimSpeed))
+        }}
+        data-testid="speed-select"
+      >
+        {SPEEDS.map((s) => <option key={s.label} value={String(s.value)}>{s.label}</option>)}
+      </select>
+    </label>
+  )
+}
+
 // ─── Toolbar ──────────────────────────────────────────────────────────────────
 
 interface ToolbarProps {
@@ -339,6 +369,7 @@ function Toolbar({ connectionType, setConnectionType, onDeleteSelected, onShowIn
       )}
 
       <div className="ml-auto flex items-center gap-2">
+        <SpeedControl />
         <button
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
             showLayers ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200' : 'text-gray-600 hover:bg-gray-50'
