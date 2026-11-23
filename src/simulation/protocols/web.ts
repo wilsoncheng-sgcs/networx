@@ -3,8 +3,8 @@ import { type TermContext, type Lines, out, err, info, self } from '../context'
 import { resolveTarget, isResolveError, isIp } from '../resolve'
 import { isListening } from '../services'
 import {
-  type Step, type CertInfo, type Leg,
-  newConversation, tcpOpen, tcpRefused, tcpClose, tlsHandshake, certificateFor, formatCertDate,
+  type Step, type CertInfo, type CertProblem, type Leg,
+  newConversation, tcpOpen, tcpRefused, tcpClose, tlsHandshake, tlsRejected, certificateFor, certProblem, formatCertDate,
   dnsConversation, runConversations, pathTo, byteLength,
 } from '../exchange'
 
@@ -91,7 +91,7 @@ export function pageFor(server: NetNode, host: string, ip: string): string {
 
 // ── Fetching a URL (shared by curl and the browser) ─────────────────────────
 
-export type WebFailure = 'bad-url' | 'nxdomain' | 'no-dns' | 'no-route' | 'refused'
+export type WebFailure = 'bad-url' | 'nxdomain' | 'no-dns' | 'no-route' | 'refused' | 'cert'
 
 export interface WebResult {
   ok: boolean
@@ -100,6 +100,8 @@ export interface WebResult {
   ip?: string
   body?: string
   cert?: CertInfo
+  /** Set when the certificate failed the check (whether or not `insecure` let the request go on). */
+  problem?: CertProblem
   lines: TerminalLine[]
   /** When the last packet arrives (ms): the browser shows the page then. */
   endMs: number
@@ -107,13 +109,17 @@ export interface WebResult {
 
 interface FetchOptions {
   verbose?: boolean
+  /** curl -k: carry on when the certificate fails the check. */
+  insecure?: boolean
+  /** curl -I: send HEAD and print only the response headers. */
+  head?: boolean
   userAgent?: string
   /** curl prints lines; the browser plays the same Conversations silently. */
   withLines?: boolean
 }
 
 export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {}): WebResult {
-  const { verbose = false, userAgent = CURL_USER_AGENT, withLines = true } = opts
+  const { verbose = false, insecure = false, userAgent = CURL_USER_AGENT, withLines = true } = opts
   const url = parseUrl(raw)
   if (!url) return { ok: false, url: null, failure: 'bad-url', lines: [err(`curl: (3) URL rejected: Bad hostname`)], endMs: 0 }
   const { host, port, scheme, path } = url
@@ -171,7 +177,8 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
 
   // 3. TCP, (TLS), HTTP, close
   const body = pageFor(server, host, r.ip)
-  const cert = tls ? certificateFor(host) : undefined
+  const cert = tls ? certificateFor(host, server.data.certificate ?? 'valid') : undefined
+  const problem = cert ? certProblem(cert, host) ?? undefined : undefined
   const conv = newConversation(ctx.selfId, server.id, r.ip, port, [])
 
   const open = tcpOpen()
@@ -179,17 +186,36 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
     ...v(info(`ⓘ TCP three-way handshake: SYN → SYN-ACK → ACK (your port ${conv.clientPort} → server port ${port})`)),
     ...v(out(`* Connected to ${host} (${r.ip}) port ${port}`)),
   ]
+  const helloLines = [
+    ...v(out('* TLS handshake, Client hello (1):')),
+    ...v(info(`ⓘ The Client hello names the site (${host}) in plain text.`)),
+  ]
+  const serverHelloLines = [
+    ...v(out('* TLS handshake, Server hello (2):')),
+    ...v(out('* TLS handshake, Certificate (11):')),
+  ]
+
+  // The certificate fails the check: the client sends an alert and hangs up (spec §3.3)
+  if (cert && problem && !insecure) {
+    const rejected = tlsRejected(host, cert, problem.verify)
+    rejected[0]!.lines = helloLines
+    rejected[1]!.lines = [
+      ...serverHelloLines,
+      ...v(out(`* ${problem.curl.replace(/^curl: \(60\) /, '')}`)),
+      ...v(out('* Closing connection')),
+      ...L(err(problem.curl)),
+      ...L(info(`ⓘ ${problem.explain}`)),
+    ]
+    conv.steps = [...open, ...rejected, ...tcpClose()]
+    legs.push({ conv, path: path2 })
+    const run = runConversations(legs, ctx)
+    return { ok: false, url, failure: 'cert', ip: r.ip, cert, problem, lines: [...immediate, ...run.lines], endMs: run.endMs }
+  }
 
   const handshake = cert ? tlsHandshake(host, cert) : []
   if (cert) {
-    handshake[0]!.lines = [
-      ...v(out('* TLS handshake, Client hello (1):')),
-      ...v(info(`ⓘ The Client hello names the site (${host}) in plain text.`)),
-    ]
-    handshake[1]!.lines = [
-      ...v(out('* TLS handshake, Server hello (2):')),
-      ...v(out('* TLS handshake, Certificate (11):')),
-    ]
+    handshake[0]!.lines = helloLines
+    handshake[1]!.lines = serverHelloLines
     handshake[2]!.lines = [
       ...v(out('* TLS handshake, Finished (20):')),
       ...v(out('* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384')),
@@ -199,7 +225,12 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
       ...v(out(`*  start date: ${formatCertDate(cert.start)}`)),
       ...v(out(`*  expire date: ${formatCertDate(cert.expire)}`)),
       ...v(out(`*  issuer: ${cert.issuer}`)),
-      ...v(out('*  SSL certificate verify ok.')),
+      ...(problem
+        ? [
+            ...v(out(`*  SSL certificate verify result: ${problem.verify}, continuing anyway.`)),
+            ...L(info(`ⓘ -k skipped the certificate check. ${problem.explain} The connection is still encrypted, but you can't be sure who is on the other end.`)),
+          ]
+        : v(out('*  SSL certificate verify ok.'))),
     ]
   }
 
@@ -223,20 +254,45 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
   conv.steps = [...open, ...handshake, ...http, ...close]
   legs.push({ conv, path: path2 })
   const run = runConversations(legs, ctx)
-  return { ok: true, url, ip: r.ip, body, cert, lines: [...immediate, ...run.lines], endMs: run.endMs }
+  return { ok: true, url, ip: r.ip, body, cert, problem, lines: [...immediate, ...run.lines], endMs: run.endMs }
 }
 
 // ── curl ─────────────────────────────────────────────────────────────────────
+
+export interface CurlFlags {
+  verbose: boolean
+  insecure: boolean
+  head: boolean
+  unknown: string[]
+}
+
+/** curl's flags: -v, -k, -I, combined (-vk) or long (--verbose, --insecure, --head). */
+export function parseCurlFlags(flags: string[]): CurlFlags {
+  const f: CurlFlags = { verbose: false, insecure: false, head: false, unknown: [] }
+  const long: Record<string, keyof Omit<CurlFlags, 'unknown'>> = { '--verbose': 'verbose', '--insecure': 'insecure', '--head': 'head' }
+  const short: Record<string, keyof Omit<CurlFlags, 'unknown'>> = { v: 'verbose', k: 'insecure', I: 'head' }
+  for (const flag of flags) {
+    if (flag.startsWith('--')) {
+      const key = long[flag]
+      if (key) f[key] = true
+      else f.unknown.push(flag)
+      continue
+    }
+    const letters = flag.slice(1).split('')
+    if (letters.length && letters.every((c) => short[c])) letters.forEach((c) => { f[short[c]!] = true })
+    else f.unknown.push(flag)
+  }
+  return f
+}
 
 export function cmdCurl(args: string[], ctx: TermContext, plain = false): Lines {
   const flags = plain ? [] : args.filter((a) => a.startsWith('-'))
   const rest = args.filter((a) => plain || !a.startsWith('-'))
   const url = rest[0]
-  if (!url) return [err(plain ? 'Usage: wget <url>' : 'Usage: curl [-v] <url>   e.g. curl -v https://www.careconnect.example')]
-  const verbose = flags.some((f) => /^-[a-zA-Z]*v/.test(f) || f === '--verbose')
-  const unsupported = flags.filter((f) => !/^-[a-zA-Z]*v[a-zA-Z]*$/.test(f) && f !== '--verbose')
-  const notes: Lines = unsupported.length
-    ? [info(`ⓘ ${unsupported.join(' ')} is not available in Networx yet; ignoring.`)]
+  if (!url) return [err(plain ? 'Usage: wget <url>' : 'Usage: curl [-v] [-k] [-I] <url>   e.g. curl -v https://www.careconnect.example')]
+  const f = parseCurlFlags(flags)
+  const notes: Lines = f.unknown.length
+    ? [info(`ⓘ ${f.unknown.join(' ')} is not available in Networx; ignoring.`)]
     : []
-  return [...notes, ...fetchUrl(url, ctx, { verbose }).lines]
+  return [...notes, ...fetchUrl(url, ctx, { verbose: f.verbose, insecure: f.insecure, head: f.head }).lines]
 }

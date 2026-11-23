@@ -1,6 +1,6 @@
 import type { Mailbox, MailMessage, NetNode, NodeData } from '../../types'
 import { type TermContext, type Lines, out, err, info, self } from '../context'
-import { type Step, tcpOpen, tlsHandshake, insideTls, certificateFor, byteLength } from '../exchange'
+import { type Step, tcpOpen, tcpClose, tlsHandshake, tlsRejected, insideTls, certificateFor, certProblem, byteLength } from '../exchange'
 import { connectTo, isFailure, serviceUp, refuse, play, portOf, c2s, s2c, type Target } from './common'
 import type { ServiceId } from '../services'
 
@@ -53,7 +53,24 @@ function mailServer(cmd: string, address: string, ctx: TermContext): Target | { 
 /** With --tls: a TLS handshake straight after the TCP handshake, then the whole session inside TLS. */
 function withTls(t: Target, steps: Step[], tls: boolean): Step[] {
   if (!tls) return steps
-  return [...tlsHandshake(t.r.name, certificateFor(t.r.name)), ...insideTls(steps)]
+  return [...tlsHandshake(t.r.name, certificateFor(t.r.name, t.server.data.certificate ?? 'valid')), ...insideTls(steps)]
+}
+
+/**
+ * With --tls and a certificate that fails the check: the client hangs up after ServerHello, before
+ * sending its password. Returns the timed lines, or null when the certificate is fine (or no TLS).
+ */
+function tlsRefusal(cmd: string, t: Target, tls: boolean, port: number, ctx: TermContext): Lines | null {
+  if (!tls) return null
+  const cert = certificateFor(t.r.name, t.server.data.certificate ?? 'valid')
+  const problem = certProblem(cert, t.r.name)
+  if (!problem) return null
+  const rejected = tlsRejected(t.r.name, cert, problem.verify)
+  rejected[1]!.lines = [
+    err(`${cmd}: TLS handshake failed: ${problem.verify}`),
+    info(`ⓘ ${problem.explain} The client stopped before sending the password.`),
+  ]
+  return play(t, port, [...tcpOpen(), ...rejected, ...tcpClose()], ctx)
 }
 
 // ── POP3 ─────────────────────────────────────────────────────────────────────
@@ -160,6 +177,9 @@ export function cmdPop3(args: string[], ctx: TermContext): Lines {
   if (!serviceUp(t, service)) {
     return [intro, ...refuse(t, port, ctx, [err(`pop3: connect to ${t.r.name} (${t.r.ip}) port ${port}: Connection refused`)])]
   }
+
+  const refusal = tlsRefusal('pop3', t, tls, port, ctx)
+  if (refusal) return [intro, ...refusal]
 
   const mailbox = findMailbox(t.server, address)
   const steps = [...tcpOpen(), ...withTls(t, pop3Session({ address, password: mailbox?.password ?? '', mailbox, keep }), tls)]
@@ -294,6 +314,9 @@ export function cmdImap(args: string[], ctx: TermContext): Lines {
     return [intro, ...refuse(t, port, ctx, [err(`imap: connect to ${t.r.name} (${t.r.ip}) port ${port}: Connection refused`)])]
   }
 
+  const refusal = tlsRefusal('imap', t, tls, port, ctx)
+  if (refusal) return [intro, ...refusal]
+
   const mailbox = findMailbox(t.server, address)
   const steps = [...tcpOpen(), ...withTls(t, imapSession({ address, password: mailbox?.password ?? '', mailbox, read }), tls)]
   const lines = play(t, port, steps, ctx)
@@ -408,6 +431,9 @@ export function cmdSmtp(args: string[], ctx: TermContext): Lines {
   if (!serviceUp(t, service)) {
     return [intro, ...refuse(t, port, ctx, [err(`smtp: connect to ${t.r.name} (${t.r.ip}) port ${port}: Connection refused`)])]
   }
+
+  const refusal = tlsRefusal('smtp', t, tls, port, ctx)
+  if (refusal) return [intro, ...refusal]
 
   const sender = findMailbox(t.server, from)
   const recipient = findMailbox(t.server, to)

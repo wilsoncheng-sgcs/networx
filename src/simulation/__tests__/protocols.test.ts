@@ -82,7 +82,7 @@ describe('web', () => {
   })
 
   it('the demo certificate is dated relative to today', () => {
-    const c = certificateFor('h', new Date(Date.UTC(2026, 10, 23, 9)))
+    const c = certificateFor('h', 'valid', new Date(Date.UTC(2026, 10, 23, 9)))
     expect(formatCertDate(c.start)).toBe('Sep 24 00:00:00 2026 GMT')
     expect(formatCertDate(c.expire)).toBe('Sep 19 23:59:59 2027 GMT')
   })
