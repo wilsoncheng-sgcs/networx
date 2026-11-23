@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 
 import { useNetworkStore } from './store'
-import DeviceNode from './nodes/DeviceNode'
+import DeviceNode, { TERMINAL_TYPES } from './nodes/DeviceNode'
 import DeletableEdge from './edges/DeletableEdge'
 import DevicePalette from './components/DevicePalette'
 import ConfigPanel from './components/ConfigPanel'
@@ -98,7 +98,8 @@ function NetworkCanvas() {
               pc: '#2563eb', laptop: '#7c3aed', server: '#059669',
               router: '#dc2626', switch: '#d97706', hub: '#6b7280',
               wap: '#0891b2', firewall: '#9333ea', dns: '#0284c7',
-              web: '#16a34a', cloud: '#0369a1',
+              web: '#16a34a', cloud: '#0369a1', gateway: '#0f766e',
+              mail: '#be185d', file: '#a16207',
             }
             const node = n as NetNode
             return colors[node.data?.deviceType ?? ''] ?? '#6b7280'
@@ -373,7 +374,7 @@ function Toolbar({ connectionType, setConnectionType, onDeleteSelected, onShowIn
 function SidePanel() {
   const { nodes, selectedNodeId, activePanel, setPanel } = useNetworkStore()
   const node = nodes.find((n) => n.id === selectedNodeId)
-  const hasTerminal = node && ['pc', 'laptop', 'server', 'dns', 'web'].includes(node.data.deviceType)
+  const hasTerminal = node && TERMINAL_TYPES.includes(node.data.deviceType)
   const hasBrowser  = node && ['pc', 'laptop', 'server'].includes(node.data.deviceType)
 
   if (!activePanel) return null

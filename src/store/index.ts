@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { addEdge, applyNodeChanges, applyEdgeChanges } from '@xyflow/react'
 import type { NodeChange, EdgeChange, Connection } from '@xyflow/react'
 import type { NetNode, NetEdge, NodeData, PanelType, RouteEntry, MacEntry, ArpEntry, FirewallRule, DnsRecord, TerminalLine, PacketAnim } from '../types'
-import { makeDefaultData } from '../simulation/defaults'
+import { makeDefaultData, normaliseNode } from '../simulation/defaults'
 import type { Preset } from '../simulation/presets'
 
 const STORAGE_KEY = 'networx-state-v1'
@@ -15,7 +15,8 @@ function loadSaved(): { nodes: NetNode[]; edges: NetEdge[] } | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
-    return JSON.parse(raw) as { nodes: NetNode[]; edges: NetEdge[] }
+    const parsed = JSON.parse(raw) as { nodes: NetNode[]; edges: NetEdge[] }
+    return { nodes: (parsed.nodes ?? []).map(normaliseNode), edges: parsed.edges ?? [] }
   } catch {
     return null
   }
@@ -269,7 +270,7 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
 
   loadPreset: (preset) => {
     set({
-      nodes: preset.nodes,
+      nodes: preset.nodes.map(normaliseNode),
       edges: preset.edges,
       selectedNodeId: null,
       activePanel: null,
