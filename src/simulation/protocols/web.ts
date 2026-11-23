@@ -38,16 +38,22 @@ export function parseUrl(raw: string): ParsedUrl | null {
 export const CURL_USER_AGENT = 'curl/8.7.1'
 export const BROWSER_USER_AGENT = 'Mozilla/5.0 (Networx Browser)'
 
-export function httpRequestHeaders(host: string, path: string, userAgent = CURL_USER_AGENT): string[] {
+export type HttpMethod = 'GET' | 'HEAD'
+
+export function httpRequestHeaders(host: string, path: string, userAgent = CURL_USER_AGENT, method: HttpMethod = 'GET'): string[] {
   return [
-    `GET ${path} HTTP/1.1`,
+    `${method} ${path} HTTP/1.1`,
     `Host: ${host}`,
     `User-Agent: ${userAgent}`,
     `Accept: ${userAgent === CURL_USER_AGENT ? '*/*' : 'text/html'}`,
   ]
 }
 
-export function httpResponseHeaders(body: string): string[] {
+/** Status line and headers. With `redirectTo`: 301 Moved Permanently and a Location header, no body. */
+export function httpResponseHeaders(body: string, redirectTo?: string): string[] {
+  if (redirectTo) {
+    return ['HTTP/1.1 301 Moved Permanently', `Location: ${redirectTo}`, 'Content-Length: 0']
+  }
   return [
     'HTTP/1.1 200 OK',
     'Content-Type: text/html; charset=utf-8',
@@ -55,19 +61,35 @@ export function httpResponseHeaders(body: string): string[] {
   ]
 }
 
-/** One HTTP request and its 200 OK. With `tls`, the same bytes travel inside TLS (encrypted on the wire). */
-export function httpExchange(host: string, path: string, body: string, tls = false, userAgent = CURL_USER_AGENT): Step[] {
-  const request = httpRequestHeaders(host, path, userAgent).join('\n')
-  const response = [...httpResponseHeaders(body), '', body].join('\n')
+export interface HttpOptions {
+  method?: HttpMethod
+  /** The server redirects this request (HTTP → HTTPS). */
+  redirectTo?: string
+}
+
+/**
+ * One HTTP request and its response. With `tls`, the same bytes travel inside TLS (encrypted on the wire).
+ * HEAD and 301 responses carry headers only.
+ */
+export function httpExchange(host: string, path: string, body: string, tls = false, userAgent = CURL_USER_AGENT, opts: HttpOptions = {}): Step[] {
+  const { method = 'GET', redirectTo } = opts
+  const request = httpRequestHeaders(host, path, userAgent, method).join('\n')
+  const headers = httpResponseHeaders(body, redirectTo)
+  const response = method === 'HEAD' || redirectTo ? headers.join('\n') : [...headers, '', body].join('\n')
+  const status = headers[0]!.replace('HTTP/1.1 ', '')
+  const short = redirectTo ? '301 Moved' : status
   if (tls) {
     return [
-      { dir: 'c2s', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'TLS', label: '🔒 GET', info: 'Application Data', payload: request, encrypted: true },
-      { dir: 's2c', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'TLS', label: '🔒 200 OK', info: 'Application Data', payload: response, encrypted: true },
+      { dir: 'c2s', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'TLS', label: `🔒 ${method}`, info: 'Application Data', payload: request, encrypted: true },
+      { dir: 's2c', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'TLS', label: `🔒 ${short}`.slice(0, 14), info: 'Application Data', payload: response, encrypted: true },
     ]
   }
+  const responseInfo = redirectTo
+    ? `HTTP/1.1 301 Moved Permanently  (Location: ${redirectTo})`
+    : `HTTP/1.1 ${status}${method === 'HEAD' ? '' : '  (text/html)'}`
   return [
-    { dir: 'c2s', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'HTTP', label: `GET ${path}`.slice(0, 14), info: `GET ${path} HTTP/1.1`, payload: request },
-    { dir: 's2c', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'HTTP', label: '200 OK', info: 'HTTP/1.1 200 OK  (text/html)', payload: response },
+    { dir: 'c2s', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'HTTP', label: `${method} ${path}`.slice(0, 14), info: `${method} ${path} HTTP/1.1`, payload: request },
+    { dir: 's2c', transport: 'TCP', tcpFlags: 'PSH, ACK', app: 'HTTP', label: short, info: responseInfo, payload: response },
   ]
 }
 
@@ -100,6 +122,8 @@ export interface WebResult {
   ip?: string
   body?: string
   cert?: CertInfo
+  /** The server answered 301: where it points (the browser follows it). */
+  redirect?: string
   /** Set when the certificate failed the check (whether or not `insecure` let the request go on). */
   problem?: CertProblem
   lines: TerminalLine[]
@@ -119,7 +143,7 @@ interface FetchOptions {
 }
 
 export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {}): WebResult {
-  const { verbose = false, insecure = false, userAgent = CURL_USER_AGENT, withLines = true } = opts
+  const { verbose = false, insecure = false, head = false, userAgent = CURL_USER_AGENT, withLines = true } = opts
   const url = parseUrl(raw)
   if (!url) return { ok: false, url: null, failure: 'bad-url', lines: [err(`curl: (3) URL rejected: Bad hostname`)], endMs: 0 }
   const { host, port, scheme, path } = url
@@ -234,18 +258,27 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
     ]
   }
 
-  const http = httpExchange(host, path, body, tls, userAgent)
+  const method: HttpMethod = head ? 'HEAD' : 'GET'
+  const redirectTo = !tls && server.data.deviceType === 'web' && server.data.redirectHttp
+    ? `https://${host}${path}`
+    : undefined
+  const http = httpExchange(host, path, body, tls, userAgent, { method, redirectTo })
+  const responseHeaders = httpResponseHeaders(body, redirectTo)
   http[0]!.lines = [
-    ...httpRequestHeaders(host, path, userAgent).flatMap((h) => v(out(`> ${h}`))),
+    ...httpRequestHeaders(host, path, userAgent, method).flatMap((h) => v(out(`> ${h}`))),
     ...v(out('>')),
     ...v(info(tls
       ? 'ⓘ Everything from here is encrypted on the wire. Open the packet capture to compare.'
       : 'ⓘ Everything you see below also crossed the network in plain text.')),
   ]
   http[1]!.lines = [
-    ...httpResponseHeaders(body).flatMap((h) => v(out(`< ${h}`))),
+    // -v shows the headers as `< …`; -I alone prints them plain, the way curl does
+    ...responseHeaders.flatMap((h) => (verbose ? v(out(`< ${h}`)) : head ? L(out(h)) : [])),
     ...v(out('<')),
-    ...(withLines ? body.split('\n').map((line) => out(line)) : []),
+    ...(withLines && !head && !redirectTo ? body.split('\n').map((line) => out(line)) : []),
+    ...(redirectTo
+      ? L(info(`ⓘ 301 Moved Permanently: the server says to use ${redirectTo} instead. curl stops here; a browser follows the redirect by itself. This first request still crossed the network in plain text.`))
+      : []),
   ]
 
   const close = tcpClose()
@@ -254,7 +287,7 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
   conv.steps = [...open, ...handshake, ...http, ...close]
   legs.push({ conv, path: path2 })
   const run = runConversations(legs, ctx)
-  return { ok: true, url, ip: r.ip, body, cert, problem, lines: [...immediate, ...run.lines], endMs: run.endMs }
+  return { ok: true, url, ip: r.ip, body, cert, problem, redirect: redirectTo, lines: [...immediate, ...run.lines], endMs: run.endMs }
 }
 
 // ── curl ─────────────────────────────────────────────────────────────────────

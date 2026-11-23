@@ -38,9 +38,9 @@ export default function Browser({ nodeId }: Props) {
 
   useEffect(() => () => { if (loadTimer.current) clearTimeout(loadTimer.current) }, [])
 
-  const navigate = useCallback((rawUrl: string, pushHistory = true) => {
+  const navigate = useCallback((rawUrl: string, pushHistory = true, redirects = 0) => {
     const raw = rawUrl.trim()
-    if (!raw || loading) return
+    if (!raw || (loading && redirects === 0)) return
     const parsed = parseUrl(raw)
     setShowSecurity(false)
     if (!parsed) {
@@ -60,6 +60,11 @@ export default function Browser({ nodeId }: Props) {
     if (loadTimer.current) clearTimeout(loadTimer.current)
     // Show the page when its last packet arrives
     loadTimer.current = setTimeout(() => {
+      // 301 Moved Permanently: a browser follows the Location header by itself
+      if (result.ok && result.redirect && redirects < 5) {
+        navigate(result.redirect, pushHistory, redirects + 1)
+        return
+      }
       setLoading(null)
       if (!result.ok) {
         setPage(null)

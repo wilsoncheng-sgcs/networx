@@ -94,3 +94,60 @@ describe('curl flags', () => {
     expect(parseCurlFlags(['-L', '-v']).unknown).toEqual(['-L'])
   })
 })
+
+describe('HTTP → HTTPS redirect', () => {
+  function redirecting() {
+    const net = careConnect()
+    net.nodes.find((n) => n.id === 'ccweb')!.data.redirectHttp = true
+    return net
+  }
+
+  it('answers http with 301 and a Location header, readable on the wire', () => {
+    const { captures, text } = run('patient', `curl -v http://${HOST}/book`, redirecting())
+    const reply = tcpRecords(captures).find((c) => c.app === 'HTTP' && c.srcPort === 80)!
+    expect(reply.encrypted).toBe(false)
+    expect(reply.payload).toBe(`HTTP/1.1 301 Moved Permanently\nLocation: https://${HOST}/book\nContent-Length: 0`)
+    expect(text).toContain('< HTTP/1.1 301 Moved Permanently')
+    expect(text).toContain(`< Location: https://${HOST}/book`)
+    expect(text).not.toContain('<!DOCTYPE html>')
+    expect(text).toContain('ⓘ 301 Moved Permanently')
+  })
+
+  it('leaves https alone', () => {
+    const { text } = run('patient', `curl https://${HOST}`, redirecting())
+    expect(text).toContain('<!DOCTYPE html>')
+    expect(text).not.toContain('301')
+  })
+
+  it('is off by default', () => {
+    const { text } = run('patient', `curl http://${HOST}`)
+    expect(text).toContain('<!DOCTYPE html>')
+  })
+})
+
+describe('curl -I', () => {
+  it('sends HEAD and prints only the headers', () => {
+    const { captures, text } = run('patient', `curl -I http://${HOST}`)
+    const req = tcpRecords(captures).find((c) => c.app === 'HTTP' && c.dstPort === 80)!
+    expect(req.payload!.split('\n')[0]).toBe('HEAD / HTTP/1.1')
+    const res = tcpRecords(captures).find((c) => c.app === 'HTTP' && c.srcPort === 80)!
+    expect(res.payload).not.toContain('<!DOCTYPE html>')
+    expect(res.payload).toMatch(/^HTTP\/1\.1 200 OK\nContent-Type: text\/html; charset=utf-8\nContent-Length: \d+$/)
+    expect(text).toContain('HTTP/1.1 200 OK')
+    expect(text).toContain('Content-Length:')
+    expect(text).not.toContain('<!DOCTYPE html>')
+  })
+
+  it('shows the redirect target', () => {
+    const net = careConnect()
+    net.nodes.find((n) => n.id === 'ccweb')!.data.redirectHttp = true
+    const { text } = run('patient', `curl -I http://${HOST}`, net)
+    expect(text).toContain(`Location: https://${HOST}/`)
+  })
+
+  it('works over https, encrypted', () => {
+    const { captures, text } = run('patient', `curl -I https://${HOST}`)
+    expect(captures.find((c) => c.payload?.startsWith('HEAD'))!.encrypted).toBe(true)
+    expect(text).toContain('HTTP/1.1 200 OK')
+  })
+})

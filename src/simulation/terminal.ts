@@ -385,6 +385,7 @@ function cmdHelp(): Lines {
     out('  nslookup <name>                Ask the DNS server for an address'),
     out('Web'),
     out('  curl [-v] http(s)://<host>     Fetch a page (-v shows every step)'),
+    out('       -I  headers only     -k  carry on past a bad certificate'),
     out('Files'),
     out('  ftp <host> [ls | get <file>]   FTP: ports 21 and 20, unencrypted'),
     out('  sftp <host> [ls | get <file>]  SFTP: inside SSH on port 22, encrypted'),
