@@ -42,3 +42,10 @@ Miles:
 - Reviewed screenshots and approved or redirected each change
 
 The project is an example of AI-assisted software development where a non-trivial, fully functional application was produced through conversation rather than direct coding.
+
+## SGCS protocols extension
+
+The SGCS protocols extension (ports, packet capture, TCP/TLS/DNS conversations, FTP/SFTP and SMTP/POP3/IMAP, the
+CareConnect preset) was specified by Wilson Cheng (St George Christian School) for Year 12 Software Engineering and
+built with [Claude Code](https://claude.ai/code) in November 2026, working from a written build specification and
+checked with unit tests and scripted browser runs of the lesson's scenarios.

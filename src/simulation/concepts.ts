@@ -54,23 +54,72 @@ Each layer adds a **header** when sending (encapsulation) and removes it when re
   },
   {
     id: 'protocols',
-    title: 'Common Protocols',
+    title: 'Web protocols and their ports',
     level: 'Both',
-    tags: ['HTTP', 'HTTPS', 'FTP', 'SMTP', 'DNS', 'POP', 'IMAP'],
-    summary: 'Protocols are agreed rules that allow devices to communicate.',
-    body: `**HTTP** (port 80) – HyperText Transfer Protocol. Used to request and send web pages. Stateless: each request is independent.
+    tags: ['HTTP', 'HTTPS', 'TCP/IP', 'DNS', 'FTP', 'SFTP', 'SSL', 'TLS', 'SMTP', 'POP3', 'IMAP', 'ports'],
+    summary: 'Protocols are agreed rules that allow devices to communicate. Servers listen on well-known port numbers.',
+    body: `| **Protocol** | **Transport** | **Port** | **What it does** | **Encrypted?** |
+| HTTP | TCP | 80 | Requests and sends web pages | No |
+| HTTPS | TCP | 443 | HTTP inside TLS | Yes (TLS) |
+| TCP/IP | — | none | TCP gives ports and reliable, ordered delivery; IP gives addresses and routing | No |
+| DNS | UDP (TCP for large answers) | 53 | Turns a name into an IP address | No |
+| FTP | TCP | 20/21 | File transfer: control on 21, data on 20 | No |
+| SFTP | TCP | 22 | File transfer inside SSH | Yes (SSH) |
+| SSL/TLS | TCP | none of its own | Wraps another protocol: 443, 465, 993, 995 | It is the encryption |
+| SMTP | TCP | 25 / 587 | Sends mail: 25 server → server, 587 client → server | No |
+| POP3 | TCP | 110 | Downloads mail to one device (usually deleted from the server) | No |
+| IMAP | TCP | 143 | Reads mail kept on the server; syncs across devices | No |
 
-**HTTPS** (port 443) – HTTP Secure. Encrypts data using TLS/SSL. Look for the padlock 🔒 in your browser.
+**Worth knowing:** secure versions of the mail ports — SMTP 465, IMAP 993, POP3 995.
 
-**FTP** (ports 20/21) – File Transfer Protocol. Transfers files between client and server. Can be anonymous or authenticated.
+The padlock means the connection is encrypted and the server proved its identity with a certificate — not that the site is safe to trust.
 
-**SMTP** (port 25/587) – Simple Mail Transfer Protocol. Sends email from client to server and between servers.
+Try \`ss\` on a server to see which ports it is listening on, and open the packet capture to see the ports on every packet.`,
+  },
+  {
+    id: 'ssl-tls',
+    title: 'SSL and TLS',
+    level: 'Both',
+    tags: ['SSL', 'TLS', 'HTTPS', 'encryption', 'certificate'],
+    summary: 'TLS (Transport Layer Security) replaced SSL (Secure Sockets Layer). It encrypts data in transit and authenticates the server.',
+    body: `**TLS** (Transport Layer Security) replaced **SSL** (Secure Sockets Layer). SSL 2.0 and 3.0 are prohibited/deprecated as insecure (IETF RFC 6176, RFC 7568).
 
-**POP3** (port 110) – Post Office Protocol. Downloads email to device and (usually) deletes from server.
+“SSL certificate” and tool messages like curl's “SSL connection using TLSv1.3” are **historical names** — the protocol is TLS.
 
-**IMAP** (port 143) – Internet Message Access Protocol. Keeps email on server, syncs across devices.
+**What TLS does:**
+- **Encrypts** data in transit
+- **Authenticates the server** with a certificate
+- **Detects tampering** with the data
 
-**DNS** (port 53) – Domain Name System. Translates domain names (google.com) to IP addresses (142.250.x.x).`,
+**What it doesn't:**
+- Hide the **IP addresses**, the **ports** or (usually) the **site name** — the Client Hello names the site in plain text
+- Make the site itself **trustworthy** — a scam site can have a valid certificate
+
+TLS has no port of its own: it wraps another protocol (HTTPS 443, SMTP 465, IMAP 993, POP3 995).
+
+Try \`curl -v https://www.careconnect.example\` with the packet capture open.`,
+  },
+  {
+    id: 'tcp-handshake',
+    title: 'TCP three-way handshake and ports',
+    level: 'Both',
+    tags: ['TCP', 'UDP', 'handshake', 'ports', 'SYN'],
+    summary: 'TCP opens a connection with SYN, SYN-ACK, ACK. Each end of a connection has a port number.',
+    body: `Before any data, TCP opens a connection with a **three-way handshake**:
+
+1. **SYN** — client → server: “I'd like to connect.”
+2. **SYN-ACK** — server → client: “OK, I'm ready.”
+3. **ACK** — client → server: “Connected.”
+
+**Ports** say which program a packet is for:
+- The **server** listens on a **well-known port** (80 for HTTP, 443 for HTTPS, 22 for SSH…)
+- The **client** picks a temporary **ephemeral port** (49152–65535) for each connection
+
+A connection is identified by both IP addresses and both ports. If nothing is listening, the server answers the SYN with **RST** — “connection refused”.
+
+**UDP has no handshake**: a DNS query is a single packet to port 53 and a single reply.
+
+Try \`curl http://www.careconnect.example\` and find SYN, SYN-ACK and ACK in the packet capture.`,
   },
   {
     id: 'dns',

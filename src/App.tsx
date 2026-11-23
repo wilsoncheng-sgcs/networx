@@ -413,8 +413,18 @@ function Toolbar({ connectionType, setConnectionType, onDeleteSelected, onShowIn
           target="_blank"
           rel="noopener noreferrer"
           className="text-gray-400 hover:text-gray-600 transition-colors p-1"
+          title="Networx by Miles Berry (original project)"
         >
           <HelpCircle size={16} />
+        </a>
+        <a
+          href="https://github.com/wilsoncheng-sgcs/networx#sgcs-extensions"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-[11px] font-semibold text-gray-400 hover:text-gray-600 transition-colors px-1"
+          title="About the SGCS protocols extension"
+        >
+          SGCS
         </a>
       </div>
     </header>
