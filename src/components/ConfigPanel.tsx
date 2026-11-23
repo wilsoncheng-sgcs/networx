@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { X, Plus, Trash2, Power } from 'lucide-react'
 import { useNetworkStore } from '../store'
-import type { FirewallRule, DnsRecord } from '../types'
+import type { FirewallRule, DnsRecord, StoredFile } from '../types'
+import { DEFAULT_ACCOUNT } from '../simulation/defaults'
 
 
 interface Props {
@@ -32,7 +33,7 @@ function Field({ label, value, onChange, placeholder = '', mono = false }: {
 export default function ConfigPanel({ nodeId, onClose }: Props) {
   const { nodes, updateNodeData, addRoute, removeRoute, addRule, removeRule, addDnsRecord, removeDnsRecord } = useNetworkStore()
   const node = nodes.find((n) => n.id === nodeId)
-  const [tab, setTab] = useState<'basic' | 'advanced' | 'security' | 'wireless' | 'page' | 'records'>('basic')
+  const [tab, setTab] = useState<'basic' | 'advanced' | 'security' | 'wireless' | 'page' | 'records' | 'files' | 'mailboxes' | 'services'>('basic')
 
   if (!node) return null
 
@@ -71,6 +72,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
   const isGateway = data.deviceType === 'gateway'
   const isWeb = data.deviceType === 'web'
   const isDns = data.deviceType === 'dns'
+  const isFile = data.deviceType === 'file'
   const hasIp = !(isSwitch || isHub)
 
   const TABS = [
@@ -81,6 +83,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
     ...((isFirewall || isGateway) ? [{ id: 'security', label: 'Security' }]  : []),
     ...(isWeb ? [{ id: 'page',     label: 'Page' }]       : []),
     ...(isDns ? [{ id: 'records',  label: 'Records' }]    : []),
+    ...(isFile ? [{ id: 'files',   label: 'Files' }]      : []),
   ] as { id: string; label: string }[]
 
   return (
@@ -378,6 +381,15 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
           </div>
         )}
 
+        {tab === 'files' && isFile && (
+          <FilesTab
+            account={data.account ?? DEFAULT_ACCOUNT}
+            files={data.files ?? []}
+            onAccount={(account) => upd({ account })}
+            onFiles={(files) => upd({ files })}
+          />
+        )}
+
         {tab === 'security' && (isFirewall || isGateway) && (
           <div>
             <div className="flex items-center justify-between mb-3">
@@ -506,6 +518,66 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
             </div>
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ─── File server: account and files ───────────────────────────────────────────
+
+function FilesTab({ account, files, onAccount, onFiles }: {
+  account: { user: string; password: string }
+  files: StoredFile[]
+  onAccount: (a: { user: string; password: string }) => void
+  onFiles: (f: StoredFile[]) => void
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="border border-gray-100 rounded-lg p-3 space-y-2 bg-gray-50">
+        <div className="text-sm font-medium text-gray-700">Login account (FTP and SFTP)</div>
+        <Field label="Username" value={account.user} onChange={(v) => onAccount({ ...account, user: v })} mono />
+        <Field label="Password" value={account.password} onChange={(v) => onAccount({ ...account, password: v })} mono />
+        <p className="text-xs text-gray-400">
+          Clients “know” this login. With <code className="bg-gray-100 px-1 rounded font-mono">ftp</code> it crosses the
+          network readable; with <code className="bg-gray-100 px-1 rounded font-mono">sftp</code> it is encrypted.
+        </p>
+      </div>
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-semibold text-gray-700">Files</h3>
+          <button
+            className="flex items-center gap-1 text-xs bg-blue-50 text-blue-600 hover:bg-blue-100 px-2 py-1 rounded transition-colors"
+            onClick={() => onFiles([...files, { name: `file${files.length + 1}.txt`, content: '' }])}
+          >
+            <Plus size={12} /> Add File
+          </button>
+        </div>
+        <div className="space-y-2">
+          {files.map((f, i) => (
+            <div key={i} className="bg-gray-50 rounded-lg p-2 space-y-1.5 relative">
+              <button
+                className="absolute top-2 right-2 text-gray-300 hover:text-red-400 transition-colors"
+                onClick={() => onFiles(files.filter((_, j) => j !== i))}
+                title="Remove file"
+              >
+                <Trash2 size={12} />
+              </button>
+              <input
+                className="w-[85%] font-mono text-xs border border-gray-200 rounded px-1.5 py-0.5 bg-white"
+                value={f.name}
+                onChange={(e) => onFiles(files.map((g, j) => (j === i ? { ...g, name: e.target.value } : g)))}
+              />
+              <textarea
+                className="w-full font-mono text-[11px] border border-gray-200 rounded px-1.5 py-1 bg-white resize-y"
+                rows={4}
+                value={f.content}
+                onChange={(e) => onFiles(files.map((g, j) => (j === i ? { ...g, content: e.target.value } : g)))}
+                spellCheck={false}
+              />
+            </div>
+          ))}
+          {files.length === 0 && <p className="text-xs text-gray-400 text-center py-4">No files.</p>}
+        </div>
       </div>
     </div>
   )

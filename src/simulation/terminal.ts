@@ -6,6 +6,7 @@ import { resolveTarget, isResolveError, isIp, dnsServerFor, type Resolution } fr
 import { tokenize } from './tokenize'
 import { dnsConversation, runConversations } from './exchange'
 import { cmdCurl } from './protocols/web'
+import { cmdFtp, cmdSftp } from './protocols/files'
 
 export type { TermContext } from './context'
 export { makePackets, makePacketsWithArp, edgesOnPath, finishMs, startAfter } from './packets'
@@ -424,6 +425,8 @@ export function runCommand(raw: string, baseCtx: TermContext): TerminalLine[] {
     case 'route': return cmdRoute(args, ctx)
     case 'curl':
     case 'wget': return cmdCurl(args, ctx)
+    case 'ftp': return cmdFtp(args, ctx)
+    case 'sftp': return cmdSftp(args, ctx)
     case 'ssh': return cmdSsh(args, ctx)
     case 'dhclient': return cmdDhclient(args, ctx)
     case 'clear': return [{ type: 'output', text: '\x1bCLEAR' }]
