@@ -35,21 +35,27 @@ const HANDLE_STYLE = {
   border: '2px solid #d1d5db',
 }
 
-const LAYER_INFO: Record<string, { label: string; color: string; bg: string }> = {
-  pc:       { label: 'L4 Application', color: '#1d4ed8', bg: '#dbeafe' },
-  laptop:   { label: 'L4 Application', color: '#1d4ed8', bg: '#dbeafe' },
-  server:   { label: 'L4 Application', color: '#1d4ed8', bg: '#dbeafe' },
-  dns:      { label: 'L4 Application', color: '#1d4ed8', bg: '#dbeafe' },
-  web:      { label: 'L4 Application', color: '#1d4ed8', bg: '#dbeafe' },
-  mail:     { label: 'L4 Application', color: '#1d4ed8', bg: '#dbeafe' },
-  file:     { label: 'L4 Application', color: '#1d4ed8', bg: '#dbeafe' },
-  router:   { label: 'L2 Internet',    color: '#dc2626', bg: '#fee2e2' },
-  firewall: { label: 'L2–L3',          color: '#dc2626', bg: '#fee2e2' },
-  gateway:  { label: 'L1–L2',          color: '#0f766e', bg: '#ccfbf1' },
-  wap:      { label: 'L1 Link',        color: '#d97706', bg: '#fef3c7' },
-  switch:   { label: 'L1 Link',        color: '#d97706', bg: '#fef3c7' },
-  hub:      { label: 'L1 Link',        color: '#6b7280', bg: '#f3f4f6' },
-  cloud:    { label: 'L2 Internet',    color: '#0369a1', bg: '#e0f2fe' },
+/**
+ * The TCP/IP layer a device works up to, by name (spec §7.5). Names, not numbers, so they don't clash
+ * with OSI numbering (OSI Layer 7 = Application); the tooltip gives the OSI equivalent.
+ */
+const APPLICATION = { label: 'Application', osi: 'TCP/IP Application layer = OSI layers 5–7', color: '#1d4ed8', bg: '#dbeafe' }
+const LINK = { label: 'Link', osi: 'TCP/IP Link layer = OSI layers 1–2', color: '#d97706', bg: '#fef3c7' }
+const LAYER_INFO: Record<string, { label: string; osi: string; color: string; bg: string }> = {
+  pc:       APPLICATION,
+  laptop:   APPLICATION,
+  server:   APPLICATION,
+  dns:      APPLICATION,
+  web:      APPLICATION,
+  mail:     APPLICATION,
+  file:     APPLICATION,
+  router:   { label: 'Internet',           osi: 'TCP/IP Internet layer = OSI layer 3', color: '#dc2626', bg: '#fee2e2' },
+  firewall: { label: 'Internet–Transport', osi: 'TCP/IP Internet and Transport layers = OSI layers 3–4 (filters by IP address and port)', color: '#dc2626', bg: '#fee2e2' },
+  gateway:  { label: 'Link–Internet',      osi: 'TCP/IP Link and Internet layers = OSI layers 1–3 (switch, Wi-Fi and router in one box)', color: '#0f766e', bg: '#ccfbf1' },
+  wap:      LINK,
+  switch:   LINK,
+  hub:      { ...LINK, color: '#6b7280', bg: '#f3f4f6' },
+  cloud:    { label: 'Internet',           osi: 'TCP/IP Internet layer = OSI layer 3', color: '#0369a1', bg: '#e0f2fe' },
 }
 
 export default function DeviceNode({ id, data, selected }: NodeProps<NetNode>) {
@@ -131,8 +137,10 @@ export default function DeviceNode({ id, data, selected }: NodeProps<NetNode>) {
         {showLayers && (() => {
           const l = LAYER_INFO[data.deviceType]
           return l ? (
-            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full leading-none"
-              style={{ background: l.bg, color: l.color, border: `1px solid ${l.color}44` }}>
+            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full leading-none cursor-help"
+              style={{ background: l.bg, color: l.color, border: `1px solid ${l.color}44` }}
+              title={l.osi}
+              data-testid="layer-label">
               {l.label}
             </span>
           ) : null
