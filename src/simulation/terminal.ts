@@ -4,10 +4,12 @@ import { type TermContext, type Lines, out, err, info, self, delayLines } from '
 import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
 import { resolveTarget, isResolveError, isIp, dnsServerFor, type Resolution } from './resolve'
 import { tokenize } from './tokenize'
-import { dnsConversation, runConversations } from './exchange'
+import { dnsConversation, runConversations, hostKeyFingerprint } from './exchange'
 import { cmdCurl } from './protocols/web'
 import { cmdFtp, cmdSftp } from './protocols/files'
 import { cmdPop3, cmdImap, cmdSmtp, cmdMail } from './protocols/mail'
+import { cmdSs, cmdNetstat } from './protocols/ports'
+import { isListening, servicesFor } from './services'
 
 export type { TermContext } from './context'
 export { makePackets, makePacketsWithArp, edgesOnPath, finishMs, startAfter } from './packets'
@@ -262,26 +264,6 @@ function cmdArp(args: string[], ctx: TermContext): Lines {
   return lines
 }
 
-function cmdNetstat(_args: string[], ctx: TermContext): Lines {
-  const node = self(ctx)
-  const neighbours = ctx.edges
-    .filter((e) => e.source === node.id || e.target === node.id)
-    .map((e) => (e.source === node.id ? e.target : e.source))
-
-  const lines: Lines = [
-    out('Active Internet connections (w/o servers)'),
-    out('Proto Recv-Q Send-Q Local Address           Foreign Address         State'),
-  ]
-  neighbours.forEach((nid) => {
-    const n = nodeById(nid, ctx.nodes)
-    if (n?.data.ip) {
-      lines.push(out(`tcp        0      0 ${node.data.ip}:${Math.floor(Math.random() * 20000 + 40000)}  ${n.data.ip}:80     ESTABLISHED`))
-    }
-  })
-  if (lines.length === 2) lines.push(out('(no connections)'))
-  return lines
-}
-
 function cmdRoute(_args: string[], ctx: TermContext): Lines {
   const node = self(ctx)
   const lines: Lines = [
@@ -304,8 +286,13 @@ function cmdSsh(args: string[], ctx: TermContext): Lines {
   if (!target) return [err('Usage: ssh <ip-address>')]
   const dst = nodeByIp(target, ctx.nodes)
   if (!dst) return [err(`ssh: connect to host ${target}: No route to host`)]
-  if (!['pc', 'laptop', 'server', 'web', 'dns', 'router', 'gateway'].includes(dst.data.deviceType)) {
-    return [err(`ssh: connect to host ${target}: Connection refused`)]
+  // Servers run SSH as a service (Services tab); clients and routers accept it as before
+  const sshAsService = servicesFor(dst.data.deviceType).some((s) => s.id === 'ssh')
+  const accepts = sshAsService
+    ? isListening(dst, 'ssh')
+    : ['pc', 'laptop', 'router', 'gateway'].includes(dst.data.deviceType)
+  if (!accepts) {
+    return [err(`ssh: connect to host ${target} port 22: Connection refused`)]
   }
   const src = self(ctx)
   const path = findPath(src.id, dst.id, ctx.nodes, ctx.edges)
@@ -314,8 +301,8 @@ function cmdSsh(args: string[], ctx: TermContext): Lines {
   return [
     out(`Connecting to ${target} (${dst.data.label})...`),
     out(`The authenticity of host '${target}' can't be established.`),
-    out(`ECDSA key fingerprint is SHA256:${Math.random().toString(36).slice(2, 18).toUpperCase()}.`),
-    out(`Warning: Permanently added '${target}' (ECDSA) to the list of known hosts.`),
+    out(`ED25519 key fingerprint is SHA256:${hostKeyFingerprint(dst.id)}.`),
+    out(`Warning: Permanently added '${target}' (ED25519) to the list of known hosts.`),
     info(`Connected to ${dst.data.label} (${target}). Type 'exit' to disconnect.`),
     // Signal to Terminal component to enter SSH session mode
     { type: 'output' as const, text: `\x1bSSH:${dst.id}` },
@@ -387,22 +374,34 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
 
 function cmdHelp(): Lines {
   return [
-    out('Available commands:'),
-    out('  ping <ip|host>     – Test connectivity'),
-    out('  ipconfig           – Show IP configuration (Windows style)'),
-    out('  ifconfig           – Show IP configuration (Linux style)'),
-    out('  traceroute <ip|host>– Trace network path (hostname ok)'),
-    out('  nslookup <domain>  – Query DNS for a domain name'),
-    out('  arp -a             – Show ARP table (neighbours)'),
-    out('  arp -d [ip|*]      – Delete one or all ARP entries'),
-    out('  netstat            – Show active connections'),
-    out('  route              – Show routing table'),
-    out('  curl <url>         – Make HTTP request'),
-    out('  ssh <ip>           – Connect to remote host or router (exit to quit)'),
-    out('  dhclient           – Request IP from DHCP server'),
-    out('  ipconfig /renew    – Same as dhclient (Windows style)'),
-    out('  clear              – Clear terminal'),
-    out('  help               – Show this help'),
+    out('Connectivity'),
+    out('  ping <ip|host>                 Test connectivity'),
+    out('  traceroute <ip|host>           Trace the path to a host'),
+    out('  ipconfig / ifconfig            Show IP configuration'),
+    out('  arp -a | arp -d [ip|*]         Show / delete ARP entries'),
+    out('  route                          Show routing table'),
+    out('  dhclient / ipconfig /renew     Get an IP address by DHCP'),
+    out('Name lookup'),
+    out('  nslookup <name>                Ask the DNS server for an address'),
+    out('Web'),
+    out('  curl [-v] http(s)://<host>     Fetch a page (-v shows every step)'),
+    out('Files'),
+    out('  ftp <host> [ls | get <file>]   FTP: ports 21 and 20, unencrypted'),
+    out('  sftp <host> [ls | get <file>]  SFTP: inside SSH on port 22, encrypted'),
+    out('Mail'),
+    out('  smtp <from> <to> "<subject>"   Send a message (port 587)'),
+    out('  pop3 <address> [--keep]        Download mail to this device (port 110)'),
+    out('  imap <address> [read <n>]      Read mail kept on the server (port 143)'),
+    out('  mail [n]                       Read mail downloaded to this device'),
+    out('    add --tls to smtp, pop3 or imap for the TLS ports (465, 995, 993)'),
+    out('Ports'),
+    out('  ss  (or netstat -tuln)         Ports this device is listening on'),
+    out('  netstat                        This device\'s recent connections'),
+    out('Remote'),
+    out('  ssh <ip>                       Log in to another device (exit to leave)'),
+    out('Other'),
+    out('  clear                          Clear the terminal'),
+    out('  help                           Show this help'),
   ]
 }
 
@@ -423,6 +422,7 @@ export function runCommand(raw: string, baseCtx: TermContext): TerminalLine[] {
     case 'nslookup': return cmdNslookup(args, ctx)
     case 'arp': return cmdArp(args, ctx)
     case 'netstat': return cmdNetstat(args, ctx)
+    case 'ss': return cmdSs(args, ctx)
     case 'route': return cmdRoute(args, ctx)
     case 'curl':
     case 'wget': return cmdCurl(args, ctx)

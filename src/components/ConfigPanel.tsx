@@ -4,6 +4,7 @@ import { useNetworkStore } from '../store'
 import type { FirewallRule, DnsRecord, StoredFile, Mailbox, NetNode } from '../types'
 import { DEFAULT_ACCOUNT, defaultMailboxes } from '../simulation/defaults'
 import { PRESETS } from '../simulation/presets'
+import { servicesFor, isListening } from '../simulation/services'
 
 
 interface Props {
@@ -75,6 +76,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
   const isDns = data.deviceType === 'dns'
   const isFile = data.deviceType === 'file'
   const isMail = data.deviceType === 'mail'
+  const hasServices = ['web', 'dns', 'mail', 'file', 'server'].includes(data.deviceType)
   const hasIp = !(isSwitch || isHub)
 
   const TABS = [
@@ -87,6 +89,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
     ...(isDns ? [{ id: 'records',  label: 'Records' }]    : []),
     ...(isFile ? [{ id: 'files',   label: 'Files' }]      : []),
     ...(isMail ? [{ id: 'mailboxes', label: 'Mailboxes' }] : []),
+    ...(hasServices ? [{ id: 'services', label: 'Services' }] : []),
   ] as { id: string; label: string }[]
 
   return (
@@ -391,6 +394,41 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
             onAccount={(account) => upd({ account })}
             onFiles={(files) => upd({ files })}
           />
+        )}
+
+        {tab === 'services' && hasServices && (
+          <div data-testid="services-tab">
+            <h3 className="text-sm font-semibold text-gray-700 mb-1">Services (listening ports)</h3>
+            <p className="text-xs text-gray-400 mb-3">
+              Untick a service to stop it: clients then get “connection refused”. Check with{' '}
+              <code className="bg-gray-100 px-1 rounded font-mono">ss</code> on this device.
+            </p>
+            <div className="space-y-1.5">
+              {servicesFor(data.deviceType).map((s) => {
+                const on = isListening({ ...node, data: { ...data, isOn: true } }, s.id)
+                return (
+                  <label key={s.id} className="flex items-start gap-2 bg-gray-50 rounded-lg px-2.5 py-2 cursor-pointer hover:bg-gray-100">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={on}
+                      onChange={(e) => upd({ services: { ...(data.services ?? {}), [s.id]: e.target.checked } })}
+                      data-testid={`service-${s.id}`}
+                    />
+                    <div className="min-w-0">
+                      <div className="text-sm text-gray-800">
+                        <span className="font-semibold">{s.protocol}</span>{' '}
+                        <span className="font-mono text-xs text-gray-500">{s.transport} {s.port}</span>
+                        {s.secure && <span className="ml-1" title="Encrypted">🔒</span>}
+                      </div>
+                      <div className="text-xs text-gray-500 leading-snug">{s.description}</div>
+                    </div>
+                  </label>
+                )
+              })}
+            </div>
+            {!data.isOn && <p className="text-xs text-red-500 mt-2">This device is offline, so nothing is listening.</p>}
+          </div>
         )}
 
         {tab === 'mailboxes' && isMail && (
