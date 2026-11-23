@@ -44,6 +44,23 @@ function node(
   }
 }
 
+/**
+ * Join each link at the sides that face each other (right → left, bottom → top …) instead of
+ * React Flow's default top → top, so lines don't loop over neighbouring devices.
+ */
+function sideHandles(nodes: NetNode[], edges: NetEdge[]): NetEdge[] {
+  const pos = new Map(nodes.map((n) => [n.id, n.position]))
+  return edges.map((e) => {
+    const a = pos.get(e.source), b = pos.get(e.target)
+    if (!a || !b) return e
+    const dx = b.x - a.x, dy = b.y - a.y
+    const [sourceHandle, targetHandle] = Math.abs(dx) >= Math.abs(dy)
+      ? (dx >= 0 ? ['sr', 'l'] : ['sl', 'r'])
+      : (dy >= 0 ? ['sb', 't'] : ['st', 'b'])
+    return { ...e, sourceHandle, targetHandle }
+  })
+}
+
 function edge(id: string, source: string, target: string, wireless = false): NetEdge {
   return {
     id,
@@ -101,7 +118,7 @@ const careConnect: Preset = {
       { mac: 'aa:bb:cc:01:00:01', wanIp: '198.51.100.23', dhcpEnabled: true, dhcpPool: '100-200',
         ssid: 'HomeNet', wpaKey: 'password123', band: '5GHz',
         notes: "The patient's home router. Try: ping 192.168.1.1 from the Patient's Laptop." }),
-    node('patient',   'laptop',  "Patient's Laptop",   '192.168.1.101', { x: 0, y: 150 },
+    node('patient',   'laptop',  "Patient's Laptop",   '192.168.1.101', { x: -60, y: 150 },
       { mac: 'aa:bb:cc:01:01:01',
         notes: 'Try: curl -v http://www.careconnect.example then curl -v https://www.careconnect.example' }),
 
@@ -109,9 +126,9 @@ const careConnect: Preset = {
     node('ccrouter',  'router',  'CareConnect Router', '203.0.113.1',   { x: 520, y: 40 },
       { mac: 'aa:bb:cc:02:00:01', wanIp: '198.51.100.1',
         notes: "Try: traceroute www.careconnect.example from the Patient's Laptop." }),
-    node('ccsw',      'switch',  'Server Switch',      '',              { x: 690, y: 40 },
+    node('ccsw',      'switch',  'Server Switch',      '',              { x: 690, y: 20 },
       { mac: 'aa:bb:cc:02:00:02', notes: "Try: run a curl, then open this switch's MAC Table." }),
-    node('ccdns',     'dns',     'DNS Server',         '203.0.113.53',  { x: 860, y: -70 },
+    node('ccdns',     'dns',     'DNS Server',         '203.0.113.53',  { x: 880, y: -205 },
       { mac: 'aa:bb:cc:02:00:53',
         dnsRecords: [
           { id: 'cc1', hostname: 'careconnect.example',       ip: '203.0.113.80' },
@@ -120,11 +137,11 @@ const careConnect: Preset = {
           { id: 'cc4', hostname: 'files.careconnect.example', ip: '203.0.113.21' },
         ],
         notes: 'Try: nslookup files.careconnect.example (from any device).' }),
-    node('ccweb',     'web',     'CareConnect Web',    '203.0.113.80',  { x: 1010, y: -70 },
+    node('ccweb',     'web',     'CareConnect Web',    '203.0.113.80',  { x: 880, y: -85 },
       { mac: 'aa:bb:cc:02:00:80', pageContent: CARECONNECT_PAGE,
         services: { http: true, https: true }, certificate: 'valid', redirectHttp: false,
         notes: "Try: curl -v https://www.careconnect.example (from the Patient's Laptop)." }),
-    node('ccmail',    'mail',    'Mail Server',        '203.0.113.25',  { x: 860, y: 90 },
+    node('ccmail',    'mail',    'Mail Server',        '203.0.113.25',  { x: 880, y: 60 },
       { mac: 'aa:bb:cc:02:00:25', certificate: 'valid', mailDomain: 'careconnect.example',
         mailboxes: [
           { address: 'reception@careconnect.example', password: 'Front2026!', messages: [
@@ -139,7 +156,7 @@ const careConnect: Preset = {
           ] },
         ],
         notes: "Try: pop3 dr.nguyen@careconnect.example (from the Doctor's PC), then the same from the Doctor's Laptop." }),
-    node('ccfile',    'file',    'File Server',        '203.0.113.21',  { x: 1010, y: 90 },
+    node('ccfile',    'file',    'File Server',        '203.0.113.21',  { x: 880, y: 200 },
       { mac: 'aa:bb:cc:02:00:21', services: { ftp: true, ssh: true },
         account: { user: 'clinic', password: 'Clinic2026!' }, files: defaultFiles(),
         notes: 'Try: ftp files.careconnect.example get referrals.csv, then sftp … (from the Reception PC).' }),
@@ -170,6 +187,8 @@ const careConnect: Preset = {
     edge('cc-e12', 'clinicgw', 'doclaptop', true),
   ],
 }
+
+careConnect.edges = sideHandles(careConnect.nodes, careConnect.edges)
 
 // ─── 1. Simple Star (LAN only) ───────────────────────────────────────────────
 

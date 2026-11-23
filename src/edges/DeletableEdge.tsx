@@ -96,6 +96,8 @@ export default function DeletableEdge({
             display: 'flex',
             alignItems: 'center',
             gap: '4px',
+            // A selected or tapped link's buttons sit above the devices, even where the line passes under one
+            zIndex: selected || tapped ? 2000 : undefined,
           }}
         >
           {label && (
