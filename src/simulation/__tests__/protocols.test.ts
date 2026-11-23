@@ -240,15 +240,13 @@ describe('mail', () => {
     expect(auth.note).toBe('Base64 decodes to: \\0reception@careconnect.example\\0Front2026!')
   })
 
-  it('smtp delivers to a local mailbox and refuses relaying', () => {
+  it('smtp delivers to a local mailbox', () => {
     const net = careConnect()
     const { text } = run('reception', 'smtp reception@careconnect.example dr.nguyen@careconnect.example "Patient arrived"', net)
     expect(text).toContain('250 OK queued')
     const box = net.nodes.find((n) => n.id === 'ccmail')!.data.mailboxes!.find((b) => b.address.startsWith('dr.nguyen'))!
     expect(box.messages).toHaveLength(3)
     expect(box.messages[2]).toMatchObject({ subject: 'Patient arrived', seen: false, body: 'This message was sent from Networx.' })
-    const relay = run('reception', 'smtp reception@careconnect.example someone@elsewhere.example "x"', net)
-    expect(relay.text).toContain('550 relay not permitted in Networx')
   })
 
   it('--tls hides the password: no Base64 note, all application steps encrypted', () => {

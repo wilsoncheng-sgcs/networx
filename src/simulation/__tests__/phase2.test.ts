@@ -151,3 +151,54 @@ describe('curl -I', () => {
     expect(text).toContain('HTTP/1.1 200 OK')
   })
 })
+
+describe('SMTP relay on port 25', () => {
+  const SEND = 'smtp reception@careconnect.example referrals@gp-clinic.example "Referral"'
+
+  it('passes mail for another domain from the server to the internet on port 25', () => {
+    const { captures, text } = run('reception', SEND)
+    expect(text).toContain('250 OK queued')
+    expect(text).toContain("ⓘ Your server passes the message to the recipient's server on port 25.")
+    const relay = captures.filter((c) => c.dstPort === 25 || c.srcPort === 25)
+    expect(relay.length).toBeGreaterThan(0)
+    // The mail server is the client now: it starts the connection from its own address
+    const syn = relay.find((c) => c.tcpFlags === 'SYN')!
+    expect(syn.srcIp).toBe('203.0.113.25')
+    expect(syn.dstIp).toMatch(/^198\.51\.100\.\d+$/)
+    expect(syn.srcPort).toBeGreaterThanOrEqual(49152)
+    // No AUTH between servers, and the message is readable
+    expect(relay.some((c) => c.payload?.startsWith('AUTH'))).toBe(false)
+    expect(relay.find((c) => c.payload?.startsWith('From:'))!.encrypted).toBe(false)
+    expect(relay.find((c) => c.payload?.startsWith('EHLO'))!.payload).toBe('EHLO mail.careconnect.example')
+  })
+
+  it('relays after a --tls submission too: TLS covers only your link to your server', () => {
+    const { captures } = run('reception', `${SEND} --tls`)
+    expect(captures.filter((c) => c.dstPort === 465).every((c) => c.encrypted || c.app === null || c.info.startsWith('Client Hello'))).toBe(true)
+    expect(captures.find((c) => c.dstPort === 25 && c.payload?.startsWith('From:'))!.encrypted).toBe(false)
+  })
+
+  it('delivers into a second mail server in the network that holds the domain', () => {
+    const net = careConnect()
+    const ccmail = net.nodes.find((n) => n.id === 'ccmail')!
+    net.nodes.push({
+      ...structuredClone(ccmail), id: 'gpmail', position: { x: 0, y: 0 },
+      data: { ...structuredClone(ccmail.data), label: 'GP Mail', ip: '198.51.100.7', mac: 'aa:bb:cc:09:00:07', mailDomain: 'gp-clinic.example',
+        mailboxes: [{ address: 'referrals@gp-clinic.example', password: 'x', messages: [] }] },
+    })
+    net.edges.push({ id: 'gp-e1', source: 'net', target: 'gpmail' } as typeof net.edges[number])
+    const { captures } = run('reception', SEND, net)
+    expect(captures.find((c) => c.dstPort === 25 && c.tcpFlags === 'SYN')!.dstIp).toBe('198.51.100.7')
+    const box = net.nodes.find((n) => n.id === 'gpmail')!.data.mailboxes![0]!
+    expect(box.messages).toHaveLength(1)
+    expect(box.messages[0]!.subject).toBe('Referral')
+  })
+
+  it('cannot route without an internet connection', () => {
+    const net = careConnect()
+    net.edges = net.edges.filter((e) => !(e.source === 'net' && e.target === 'ccrouter') && !(e.source === 'ccrouter' && e.target === 'net'))
+    // the client's path to its own server must still exist: send from inside the server LAN instead
+    const { text } = run('ccweb', SEND, net)
+    expect(text).toContain('554 5.4.4')
+  })
+})

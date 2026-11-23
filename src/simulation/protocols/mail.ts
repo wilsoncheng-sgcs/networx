@@ -1,8 +1,9 @@
 import type { Mailbox, MailMessage, NetNode, NodeData } from '../../types'
 import { type TermContext, type Lines, out, err, info, self } from '../context'
-import { type Step, tcpOpen, tcpClose, tlsHandshake, tlsRejected, insideTls, certificateFor, certProblem, byteLength } from '../exchange'
+import { type Step, type Leg, tcpOpen, tcpClose, tcpRefused, tlsHandshake, tlsRejected, insideTls, certificateFor, certProblem, byteLength, newConversation, runConversations } from '../exchange'
+import { findPath } from '../network'
 import { connectTo, isFailure, serviceUp, refuse, play, portOf, c2s, s2c, type Target } from './common'
-import type { ServiceId } from '../services'
+import { isListening, type ServiceId } from '../services'
 
 // ── Messages and mailboxes ───────────────────────────────────────────────────
 
@@ -351,13 +352,16 @@ export interface SmtpOptions {
   password: string | null   // null: the sender has no mailbox here
   mailDomain: string
   recipientExists: boolean
+  /** For another domain: can this server reach the recipient's server? (Default yes.) */
+  canRelay?: boolean
 }
 
-export type SmtpOutcome = 'queued' | 'auth-failed' | 'relay-denied' | 'unknown-user'
+export type SmtpOutcome = 'queued' | 'relay' | 'auth-failed' | 'unknown-user' | 'no-route'
 
+/** queued = delivered to a local mailbox; relay = accepted for another domain, passed on over port 25. */
 export function smtpOutcome(o: SmtpOptions): SmtpOutcome {
   if (o.password === null) return 'auth-failed'
-  if (domainOf(o.to) !== o.mailDomain.toLowerCase()) return 'relay-denied'
+  if (domainOf(o.to) !== o.mailDomain.toLowerCase()) return o.canRelay === false ? 'no-route' : 'relay'
   if (!o.recipientExists) return 'unknown-user'
   return 'queued'
 }
@@ -393,9 +397,9 @@ export function smtpSend(o: SmtpOptions): Step[] {
     S('c2s', 'MAIL FROM', `MAIL FROM:<${o.from}>\nRCPT TO:<${o.to}>\nDATA`, { info: `Request: MAIL FROM:<${o.from}> | RCPT TO:<${o.to}> | DATA` }),
   )
 
-  if (outcome === 'relay-denied' || outcome === 'unknown-user') {
-    const reason = outcome === 'relay-denied'
-      ? '550 relay not permitted in Networx'
+  if (outcome === 'no-route' || outcome === 'unknown-user') {
+    const reason = outcome === 'no-route'
+      ? `554 5.4.4 <${o.to}>: Unable to route: the recipient's mail server can't be reached`
       : `550 5.1.1 <${o.to}>: Recipient address rejected: User unknown`
     steps.push(S('s2c', '550', `250 OK\n${reason}\n554 5.5.1 Error: no valid recipients`, { lines: [err(reason)] }), ...quit)
     return steps
@@ -408,6 +412,79 @@ export function smtpSend(o: SmtpOptions): Step[] {
     ...quit,
   )
   return steps
+}
+
+export interface RelayOptions {
+  fromHost: string          // the sending server, e.g. mail.careconnect.example
+  toHost: string            // the recipient's server, e.g. mail.gp-clinic.example
+  from: string
+  to: string
+  subject: string
+  recipientExists: boolean  // internet servers accept any address
+}
+
+/**
+ * Server → server on port 25: the sending server is now the client. No AUTH between mail servers;
+ * the envelope and the message are the same as the submission (spec §5.4, Phase 2).
+ */
+export function smtpRelay(o: RelayOptions): Step[] {
+  const S = (dir: 'c2s' | 's2c', label: string, payload: string, extra: Partial<Step> = {}) =>
+    (dir === 'c2s' ? c2s : s2c)('SMTP', label, payload, undefined, extra)
+  const quit = [S('c2s', 'QUIT', 'QUIT'), S('s2c', '221 Bye', '221 Bye')]
+  const steps: Step[] = [
+    S('s2c', '220', `220 ${o.toHost} ESMTP`),
+    S('c2s', 'EHLO', `EHLO ${o.fromHost}`),
+    S('s2c', '250', `250 ${o.toHost} Hello ${o.fromHost}`),
+    S('c2s', 'MAIL FROM', `MAIL FROM:<${o.from}>\nRCPT TO:<${o.to}>\nDATA`, { info: `Request: MAIL FROM:<${o.from}> | RCPT TO:<${o.to}> | DATA` }),
+  ]
+  if (!o.recipientExists) {
+    const reason = `550 5.1.1 <${o.to}>: Recipient address rejected: User unknown`
+    steps.push(S('s2c', '550', `250 OK\n${reason}\n554 5.5.1 Error: no valid recipients`, {
+      lines: [info(`ⓘ ${o.toHost} answered ${reason}: the message was not delivered.`)],
+    }), ...quit)
+    return steps
+  }
+  steps.push(
+    S('s2c', '354', '250 OK\n250 OK\n354 End data with <CR><LF>.<CR><LF>'),
+    S('c2s', 'message', `From: ${o.from}\nTo: ${o.to}\nSubject: ${o.subject}\n\n${SMTP_BODY}\n.`, { info: `Message: Subject: ${o.subject}` }),
+    S('s2c', '250 queued', '250 OK queued', {
+      lines: [info(`ⓘ ${o.toHost} accepted the message. Server to server on port 25 there is no password, and here nothing is encrypted either.`)],
+    }),
+    ...quit,
+  )
+  return steps
+}
+
+/** A stand-in address for an internet mail server (198.51.100.0/24 is reserved for documentation). */
+export function internetMailIp(domain: string): string {
+  let h = 0
+  for (const c of domain) h = (h * 31 + c.charCodeAt(0)) >>> 0
+  return `198.51.100.${10 + (h % 240)}`
+}
+
+interface RelayTarget {
+  node: NetNode
+  ip: string
+  host: string
+  path: string[]
+}
+
+/**
+ * Where a server sends mail for `domain`: a mail server in this network that holds the domain,
+ * otherwise the internet. (No MX records in Networx: the domain's server is found directly.)
+ */
+function relayTarget(server: NetNode, domain: string, ctx: TermContext): RelayTarget | null {
+  const host = `mail.${domain}`
+  const local = ctx.nodes.find((n) => n.id !== server.id && n.data.deviceType === 'mail' && n.data.mailDomain?.toLowerCase() === domain)
+  if (local) {
+    const path = findPath(server.id, local.id, ctx.nodes, ctx.edges)
+    return path ? { node: local, ip: local.data.ip, host, path } : null
+  }
+  for (const cloud of ctx.nodes.filter((n) => n.data.deviceType === 'cloud' && n.data.isOn)) {
+    const path = findPath(server.id, cloud.id, ctx.nodes, ctx.edges)
+    if (path) return { node: cloud, ip: internetMailIp(domain), host, path }
+  }
+  return null
 }
 
 function ehloName(label: string): string {
@@ -437,6 +514,9 @@ export function cmdSmtp(args: string[], ctx: TermContext): Lines {
 
   const sender = findMailbox(t.server, from)
   const recipient = findMailbox(t.server, to)
+  const toDomain = domainOf(to)
+  const remote = toDomain !== (t.server.data.mailDomain ?? '').toLowerCase()
+  const target = remote ? relayTarget(t.server, toDomain, ctx) : null
   const opts: SmtpOptions = {
     serverHost: t.r.name,
     clientName: ehloName(self(ctx).data.label),
@@ -444,6 +524,7 @@ export function cmdSmtp(args: string[], ctx: TermContext): Lines {
     password: sender?.password ?? null,
     mailDomain: t.server.data.mailDomain ?? '',
     recipientExists: !!recipient,
+    canRelay: !!target,
   }
   let session = smtpSend(opts)
   if (tls) {
@@ -451,12 +532,33 @@ export function cmdSmtp(args: string[], ctx: TermContext): Lines {
     session = session.map((s) => (s.note ? { ...s, note: undefined, lines: [info('ⓘ AUTH travelled inside TLS this time: a capture shows only ciphertext.')] } : s))
   }
   const steps = [...tcpOpen(), ...withTls(t, session, tls)]
-  const lines = play(t, port, steps, ctx)
+  const legs: Leg[] = [...t.legs, { conv: newConversation(ctx.selfId, t.server.id, t.r.ip, port, steps), path: t.path }]
 
-  if (smtpOutcome(opts) === 'queued') {
-    const server = t.server
-    const endMs = Math.max(0, ...lines.map((l) => l.delayMs ?? 0))
-    later(ctx, endMs, () => ctx.updateNodeData?.(server.id, patchMailbox(server, to, (b) => ({
+  // Another domain: your server becomes the client and passes the message on, on port 25
+  const outcome = smtpOutcome(opts)
+  let deliverTo: NetNode | null = null
+  if (outcome === 'relay' && target) {
+    const relayPort = portOf('smtp')
+    const passOn = info(`ⓘ Your server passes the message to the recipient's server on port ${relayPort}.`)
+    const destination = target.node.data.deviceType === 'mail' ? target.node : null
+    let relaySteps: Step[]
+    if (destination && !isListening(destination, 'smtp')) {
+      relaySteps = tcpRefused()
+      relaySteps[1]!.lines = [info(`ⓘ ${target.host} refused the connection on port ${relayPort} (SMTP is off there): the message was not delivered.`)]
+    } else {
+      const exists = destination ? !!findMailbox(destination, to) : true
+      relaySteps = [...tcpOpen(), ...smtpRelay({ fromHost: t.r.name, toHost: target.host, from, to, subject, recipientExists: exists }), ...tcpClose()]
+      if (destination && exists) deliverTo = destination
+    }
+    relaySteps[0]!.lines = [passOn]
+    legs.push({ conv: newConversation(t.server.id, target.node.id, target.ip, relayPort, relaySteps), path: target.path })
+  }
+  const lines = runConversations(legs, ctx).lines
+
+  const endMs = Math.max(0, ...lines.map((l) => l.delayMs ?? 0))
+  const box = outcome === 'queued' ? t.server : deliverTo
+  if (box) {
+    later(ctx, endMs, () => ctx.updateNodeData?.(box.id, patchMailbox(box, to, (b) => ({
       ...b,
       messages: [...b.messages, { id: `m-${Date.now().toString(36)}`, from, to, subject, body: SMTP_BODY, seen: false }],
     }))))
