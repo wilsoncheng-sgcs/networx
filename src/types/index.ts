@@ -124,3 +124,40 @@ export interface PacketAnim {
   durationMs: number
   reverse?: boolean
 }
+
+export type AnimSpeed = 0.5 | 1 | 3 | 'instant'
+
+/** Application protocol of a captured packet; null for pure TCP control segments (SYN etc.). */
+export type AppProtocol =
+  | 'DNS' | 'HTTP' | 'TLS' | 'FTP' | 'FTP-DATA' | 'SSH' | 'SMTP' | 'POP3' | 'IMAP' | 'ICMP' | 'ARP' | null
+
+export interface CaptureRecord {
+  no: number
+  timeMs: number
+  conversationId: string
+  stepIndex: number
+  srcIp: string; srcPort?: number; dstIp: string; dstPort?: number
+  srcMac: string; dstMac: string          // first hop of the leg
+  transport: 'TCP' | 'UDP' | 'ICMP' | 'ARP'
+  tcpFlags?: string
+  app: AppProtocol
+  info: string
+  payload?: string                        // what is on the wire (plaintext; for encrypted steps only the teacher view shows it)
+  cleartext?: string                      // readable part of a partly-encrypted record (TLS ServerHello)
+  note?: string                           // extra line for the detail pane (e.g. a Base64 decode)
+  encrypted: boolean
+  length: number
+}
+
+/** A capture record waiting to be appended `delayMs` after the command ran. */
+export interface PendingCapture extends Omit<CaptureRecord, 'no' | 'timeMs'> {
+  delayMs: number
+}
+
+/** A finished TCP connection, for plain `netstat`. */
+export interface ConnRecord {
+  localIp: string
+  localPort: number
+  remoteIp: string
+  remotePort: number
+}

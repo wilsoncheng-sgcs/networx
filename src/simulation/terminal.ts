@@ -1,262 +1,36 @@
-import type { NetNode, NetEdge, TerminalLine, MacEntry, ArpEntry, PacketAnim, NodeData } from '../types'
-import { findPath, nodeByIp, nodeById, sameSubnet, simulatePingRtt, subnetToCidr } from './network'
+import type { TerminalLine, PacketAnim } from '../types'
+import { findPath, nodeById, nodeByIp, simulatePingRtt, subnetToCidr } from './network'
+import { type TermContext, type Lines, out, err, info, self, delayLines } from './context'
+import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter } from './packets'
+import { resolveTarget, isResolveError, isIp, dnsServerFor, type Resolution } from './resolve'
+import { tokenize } from './tokenize'
 
-export interface TermContext {
-  selfId: string
-  nodes: NetNode[]
-  edges: NetEdge[]
-  learnMac?: (switchId: string, entry: MacEntry) => void
-  learnArp?: (nodeId: string, entry: ArpEntry) => void
-  dispatchPackets?: (packets: PacketAnim[]) => void
-  updateNodeData?: (id: string, patch: Partial<NodeData>) => void
+export type { TermContext } from './context'
+export { makePackets, makePacketsWithArp, edgesOnPath, finishMs, startAfter } from './packets'
+export { PUBLIC_IPS } from './resolve'
+
+/**
+ * Animate the DNS query and answer for a resolution, if a DNS server was asked.
+ * Returns when the answer arrives (ms), so later packets and lines can wait for it.
+ */
+function animateDns(r: Resolution, ctx: TermContext): number {
+  const src = self(ctx)
+  const dns = r.dnsServerNode
+  if (!dns) return 0
+  const path = findPath(src.id, dns.id, ctx.nodes, ctx.edges)
+  if (!path) return 0
+  const packets = makePacketsWithArp(src, dns, path, ctx, 'DNS', 'DNS', true)
+  ctx.dispatchPackets?.(packets)
+  return finishMs(packets)
 }
 
-// ── Packet animation helpers ──────────────────────────────────────────────────
-
-const HOP_MS = 500
-let packetSequence = 0
-
-export function edgesOnPath(nodeIds: string[], edges: NetEdge[]): string[] {
-  return segmentsOnPath(nodeIds, edges).map(({ edgeId }) => edgeId)
-}
-
-function segmentsOnPath(
-  nodeIds: string[],
-  edges: NetEdge[],
-): Array<{ edgeId: string; reverse: boolean }> {
-  return nodeIds.slice(0, -1).flatMap((nid, i) => {
-    const next = nodeIds[i + 1]
-    const e = edges.find(
-      (e) => (e.source === nid && e.target === next) || (e.source === next && e.target === nid),
-    )
-    return e ? [{ edgeId: e.id, reverse: e.source !== nid }] : []
-  })
-}
-
-export function makePackets(
-  nodeIds: string[],
-  allEdges: NetEdge[],
-  protocol: PacketAnim['protocol'],
-  label: string,
-  withReply = false,
-): PacketAnim[] {
-  const segments = segmentsOnPath(nodeIds, allEdges)
-  const N = segments.length
-  const batchId = `${Date.now()}-${++packetSequence}`
-  const forward: PacketAnim[] = segments.map(({ edgeId, reverse }, i) => ({
-    id: `pkt-${batchId}-f${i}`,
-    edgeId, protocol, label,
-    delayMs: i * HOP_MS,
-    durationMs: HOP_MS,
-    reverse,
-  }))
-  if (!withReply) return forward
-  const replyLabel = protocol === 'ICMP' || protocol === 'ARP' ? 'reply' : `${label} ↩`
-  const reply: PacketAnim[] = [...segments].reverse().map(({ edgeId, reverse }, i) => ({
-    id: `pkt-${batchId}-r${i}`,
-    edgeId, protocol,
-    label: replyLabel,
-    delayMs: (N + i) * HOP_MS,
-    durationMs: HOP_MS,
-    reverse: !reverse,
-  }))
-  return [...forward, ...reply]
-}
-
-// When a packet path traverses a switch, learn MAC→port mappings
-function populateMacTables(path: string[], ctx: TermContext): void {
-  if (!ctx.learnMac) return
-  for (let i = 0; i < path.length; i++) {
-    const node = nodeById(path[i], ctx.nodes)
-    if (!node || node.data.deviceType !== 'switch') continue  // hubs don't learn MACs
-
-    // Assign port numbers by sorting the switch's connected edges
-    const switchEdges = ctx.edges
-      .filter((e) => e.source === path[i] || e.target === path[i])
-      .sort((a, b) => a.id.localeCompare(b.id))
-
-    function portFor(neighbourId: string): string {
-      const idx = switchEdges.findIndex(
-        (e) => (e.source === path[i] ? e.target : e.source) === neighbourId,
-      )
-      return `Gi0/${idx >= 0 ? idx + 1 : 1}`
-    }
-
-    // Learn MAC of the node the packet arrived from
-    if (i > 0) {
-      const prev = nodeById(path[i - 1], ctx.nodes)
-      if (prev?.data.mac) {
-        ctx.learnMac(path[i], { mac: prev.data.mac, port: portFor(path[i - 1]), vlan: 1 })
-      }
-    }
-    // Learn MAC of the next-hop node (from the return packet)
-    if (i < path.length - 1) {
-      const next = nodeById(path[i + 1], ctx.nodes)
-      if (next?.data.mac) {
-        ctx.learnMac(path[i], { mac: next.data.mac, port: portFor(path[i + 1]), vlan: 1 })
-      }
-    }
+/** The terminal error for a name that didn't resolve. */
+function resolveErrorText(cmd: string, r: Resolution & { error: string }): string {
+  switch (r.error) {
+    case 'nxdomain': return `${cmd}: cannot resolve ${r.name}: Unknown host`
+    case 'no-dns':   return `${cmd}: ${r.name}: Name or service not known`
+    default:         return `${cmd}: sendmsg: No route to host`
   }
-}
-
-function populateArpTables(src: NetNode, dst: NetNode, ctx: TermContext): void {
-  if (!ctx.learnArp || !src.data.ip || !dst.data.ip || !src.data.subnet) return
-
-  if (sameSubnet(src.data.ip, dst.data.ip, src.data.subnet)) {
-    ctx.learnArp(src.id, { ip: dst.data.ip, mac: dst.data.mac, iface: 'eth0' })
-    if (dst.data.subnet && sameSubnet(dst.data.ip, src.data.ip, dst.data.subnet)) {
-      ctx.learnArp(dst.id, { ip: src.data.ip, mac: src.data.mac, iface: 'eth0' })
-    }
-    return
-  }
-
-  const gateway = nodeByIp(src.data.gateway, ctx.nodes)
-  if (gateway?.data.mac) {
-    ctx.learnArp(src.id, { ip: gateway.data.ip, mac: gateway.data.mac, iface: 'eth0' })
-    ctx.learnArp(gateway.id, { ip: src.data.ip, mac: src.data.mac, iface: 'eth0' })
-  }
-}
-
-export function makePacketsWithArp(
-  src: NetNode,
-  dst: NetNode,
-  path: string[],
-  ctx: TermContext,
-  protocol: PacketAnim['protocol'],
-  label: string,
-  withReply = false,
-): PacketAnim[] {
-  populateMacTables(path, ctx)
-
-  let arpTarget: NetNode | undefined
-  let arpPath: string[] | null = null
-  if (src.data.ip && dst.data.ip && src.data.subnet && sameSubnet(src.data.ip, dst.data.ip, src.data.subnet)) {
-    arpTarget = dst
-    arpPath = path
-  } else if (src.data.gateway) {
-    arpTarget = nodeByIp(src.data.gateway, ctx.nodes)
-    arpPath = arpTarget ? findPath(src.id, arpTarget.id, ctx.nodes, ctx.edges) : null
-  }
-
-  const hasEntry = arpTarget
-    ? (src.data.arpTable ?? []).some(
-        (entry) => entry.ip === arpTarget!.data.ip && entry.mac === arpTarget!.data.mac,
-      )
-    : true
-
-  let arpPackets: PacketAnim[] = []
-  if (arpTarget && arpPath && !hasEntry) {
-    populateArpTables(src, dst, ctx)
-    arpPackets = makePackets(arpPath, ctx.edges, 'ARP', 'request', true)
-  }
-
-  const dataPackets = makePackets(path, ctx.edges, protocol, label, withReply)
-  if (arpPackets.length === 0) return dataPackets
-
-  const arpDelay = (arpPath!.length - 1) * HOP_MS * 2
-  return [
-    ...arpPackets,
-    ...dataPackets.map((packet) => ({ ...packet, delayMs: packet.delayMs + arpDelay })),
-  ]
-}
-
-/** When the last packet in an animation finishes, in ms from dispatch. */
-export function finishMs(packets: PacketAnim[]): number {
-  return packets.reduce((end, p) => Math.max(end, p.delayMs + p.durationMs), 0)
-}
-
-/** Shift an animation so it starts `ms` later — used to hold data packets until DNS has answered. */
-export function startAfter(packets: PacketAnim[], ms: number): PacketAnim[] {
-  return ms ? packets.map((p) => ({ ...p, delayMs: p.delayMs + ms })) : packets
-}
-
-/** One leg of a multi-step exchange (e.g. DHCP), outbound along `path` or back along it. */
-function leg(
-  path: string[],
-  edges: NetEdge[],
-  protocol: PacketAnim['protocol'],
-  label: string,
-  startMs: number,
-  back = false,
-): PacketAnim[] {
-  const segments = segmentsOnPath(path, edges)
-  const ordered = back ? [...segments].reverse() : segments
-  const batchId = `${Date.now()}-${++packetSequence}`
-  return ordered.map(({ edgeId, reverse }, i) => ({
-    id: `pkt-${batchId}-${i}`,
-    edgeId, protocol, label,
-    delayMs: startMs + i * HOP_MS,
-    durationMs: HOP_MS,
-    reverse: back ? !reverse : reverse,
-  }))
-}
-
-type Lines = TerminalLine[]
-
-function out(text: string): TerminalLine { return { type: 'output', text } }
-function err(text: string): TerminalLine { return { type: 'error', text } }
-function info(text: string): TerminalLine { return { type: 'info', text } }
-
-function self(ctx: TermContext): NetNode {
-  return nodeById(ctx.selfId, ctx.nodes)!
-}
-
-// ─── Hostname / DNS helpers ────────────────────────────────────────────────
-
-export const PUBLIC_IPS: Record<string, string> = {
-  'google.com':      '142.250.185.46',
-  'www.google.com':  '142.250.185.46',
-  'youtube.com':     '142.250.68.110',
-  'bbc.co.uk':       '151.101.0.81',
-  'bbc.com':         '151.101.0.81',
-  'example.com':     '93.184.216.34',
-  'cloudflare.com':  '104.16.133.229',
-  'github.com':      '140.82.121.4',
-  'amazon.co.uk':    '54.239.28.85',
-  'microsoft.com':   '20.112.52.29',
-  'apple.com':       '17.253.144.10',
-  'twitter.com':     '104.244.42.193',
-  'x.com':           '104.244.42.193',
-  'facebook.com':    '157.240.241.35',
-  'wikipedia.org':   '208.80.154.224',
-  'ocr.org.uk':      '213.219.152.175',
-  'aqa.org.uk':      '23.55.180.103',
-  'eduqas.co.uk':    '185.43.135.28',
-}
-
-function isHostname(s: string): boolean {
-  return !/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(s)
-}
-
-function resolveHostname(
-  hostname: string,
-  ctx: TermContext,
-): { ip: string; dnsIp: string; cloudId: string | null; isLocal: boolean } | null {
-  const cloudNode = ctx.nodes.find((n) => n.data.deviceType === 'cloud')
-  const dnsNode   = ctx.nodes.find((n) => n.data.deviceType === 'dns')
-
-  const canReachCloud = cloudNode
-    ? findPath(ctx.selfId, cloudNode.id, ctx.nodes, ctx.edges)
-    : null
-  const canReachDns = dnsNode
-    ? findPath(ctx.selfId, dnsNode.id, ctx.nodes, ctx.edges)
-    : null
-
-  if (!canReachCloud && !canReachDns) return null
-
-  // Check DNS node's local records first (exact match, case-insensitive)
-  const localRecord = canReachDns
-    ? (dnsNode!.data.dnsRecords ?? []).find(
-        (r) => r.hostname.toLowerCase() === hostname.toLowerCase(),
-      )
-    : undefined
-
-  const ip = localRecord?.ip
-    ?? PUBLIC_IPS[hostname]
-    ?? `93.184.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`
-  const dnsIp = canReachDns ? (dnsNode!.data.ip || '8.8.8.8') : '8.8.8.8'
-
-  return { ip, dnsIp, cloudId: cloudNode?.id ?? null, isLocal: !!localRecord }
 }
 
 // Simulated internet backbone hops shown in traceroute
@@ -273,72 +47,41 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
   if (!target) return [err('Usage: ping <ip or hostname>')]
 
   const src = self(ctx)
+  const r = resolveTarget(target, ctx)
+  // The client can't address a packet it hasn't resolved yet: ICMP waits for the DNS answer
+  const afterDns = animateDns(r, ctx)
+  const lines: Lines = r.dnsServerIp ? [info(`Resolving ${target} via DNS (${r.dnsServerIp})…`)] : []
 
-  // ── Hostname branch ──────────────────────────────────────────────────────
-  if (isHostname(target)) {
-    const resolved = resolveHostname(target, ctx)
-    if (!resolved) return [err(`ping: ${target}: Name or service not known`)]
+  if (isResolveError(r)) return [...lines, err(resolveErrorText('ping', r), afterDns)]
+  const dst = r.node
+  const path = dst ? findPath(src.id, dst.id, ctx.nodes, ctx.edges) : null
+  if (!dst || !path) return [...lines, err('ping: sendmsg: No route to host', afterDns)]
 
-    const cloudNode = resolved.cloudId ? nodeById(resolved.cloudId, ctx.nodes) : null
-    const cloudPath = cloudNode
-      ? findPath(src.id, cloudNode.id, ctx.nodes, ctx.edges)
-      : null
-
-    // Animate DNS lookup, then ICMP packets to the internet once the DNS reply is back
-    // (the client can't address a packet it hasn't resolved yet)
-    const dnsNode = ctx.nodes.find((n) => n.data.deviceType === 'dns')
-    const dnsPath = dnsNode ? findPath(src.id, dnsNode.id, ctx.nodes, ctx.edges) : null
-    let afterDns = 0
-    if (dnsPath && dnsNode) {
-      const dnsPackets = makePacketsWithArp(src, dnsNode, dnsPath, ctx, 'DNS', 'DNS', true)
-      afterDns = finishMs(dnsPackets)
-      ctx.dispatchPackets?.(dnsPackets)
-    }
-    if (cloudPath && cloudNode) {
-      ctx.dispatchPackets?.(startAfter(makePacketsWithArp(src, cloudNode, cloudPath, ctx, 'ICMP', 'ICMP', true), afterDns))
-    }
-
-    const hops = (cloudPath?.length ?? 3) - 1
-    const baseRtt = 20 + hops * 8
-
-    const lines: Lines = [
-      info(`Resolving ${target} via DNS (${resolved.dnsIp})…`),
-      out(`PING ${target} (${resolved.ip}): 56 data bytes`),
-    ]
-    for (let i = 0; i < 4; i++) {
-      const rtt = baseRtt + Math.floor(Math.random() * 15)
-      lines.push(out(`64 bytes from ${resolved.ip}: icmp_seq=${i} ttl=52 time=${rtt} ms`))
-    }
-    const avg = baseRtt + 7
-    lines.push(out(''))
-    lines.push(out(`--- ${target} ping statistics ---`))
-    lines.push(out(`4 packets transmitted, 4 packets received, 0.0% packet loss`))
-    lines.push(out(`round-trip min/avg/max = ${avg - 2}/${avg}/${avg + 5} ms`))
-    return lines
+  const header = isIp(target) ? `PING ${target}: 56 data bytes` : `PING ${target} (${r.ip}): 56 data bytes`
+  if (!dst.data.isOn) {
+    return [...lines, out(header, afterDns), err('Request timeout for icmp_seq 0', afterDns)]
   }
 
-  // ── IP address branch ────────────────────────────────────────────────────
-  const dst = nodeByIp(target, ctx.nodes)
-  if (!dst) return [err(`ping: cannot reach ${target}: host unreachable`)]
-  if (!dst.data.isOn) return [err(`Request timeout for icmp_seq 0`)]
-
-  const path = findPath(src.id, dst.id, ctx.nodes, ctx.edges)
-  if (!path) return [err(`ping: sendmsg: No route to host`)]
-
-  ctx.dispatchPackets?.(makePacketsWithArp(src, dst, path, ctx, 'ICMP', 'ICMP', true))
+  ctx.dispatchPackets?.(startAfter(makePacketsWithArp(src, dst, path, ctx, 'ICMP', 'ICMP', true), afterDns))
 
   const hops = path.length - 1
-  const lines: Lines = [out(`PING ${target}: 56 data bytes`)]
+  const internet = dst.data.deviceType === 'cloud'
+  const body: Lines = [out(header)]
+  const rtts: number[] = []
   for (let i = 0; i < 4; i++) {
-    const rtt = simulatePingRtt(hops)
-    lines.push(out(`64 bytes from ${target}: icmp_seq=${i} ttl=${64 - hops} time=${rtt} ms`))
+    const rtt = internet ? 20 + hops * 8 + Math.floor(Math.random() * 15) : simulatePingRtt(hops)
+    rtts.push(rtt)
+    body.push(out(`64 bytes from ${r.ip}: icmp_seq=${i} ttl=${internet ? 52 : 64 - hops} time=${rtt} ms`))
   }
-  const rtt = simulatePingRtt(hops)
-  lines.push(out(''))
-  lines.push(out(`--- ${target} ping statistics ---`))
-  lines.push(out(`4 packets transmitted, 4 packets received, 0.0% packet loss`))
-  lines.push(out(`round-trip min/avg/max = ${rtt - 1}/${rtt}/${rtt + 2} ms`))
-  return lines
+  const min = Math.min(...rtts), max = Math.max(...rtts)
+  const avg = Math.round(rtts.reduce((a, b) => a + b, 0) / rtts.length)
+  body.push(
+    out(''),
+    out(`--- ${target} ping statistics ---`),
+    out('4 packets transmitted, 4 packets received, 0.0% packet loss'),
+    out(`round-trip min/avg/max = ${min}/${avg}/${max} ms`),
+  )
+  return [...lines, ...delayLines(body, afterDns)]
 }
 
 function cmdTraceroute(args: string[], ctx: TermContext): Lines {
@@ -346,85 +89,41 @@ function cmdTraceroute(args: string[], ctx: TermContext): Lines {
   if (!target) return [err('Usage: traceroute <ip or hostname>')]
 
   const src = self(ctx)
+  const r = resolveTarget(target, ctx)
+  const afterDns = animateDns(r, ctx)
+  const lines: Lines = r.dnsServerIp ? [info(`Resolving ${target} via DNS (${r.dnsServerIp})…`)] : []
 
-  // ── Hostname branch ──────────────────────────────────────────────────────
-  if (isHostname(target)) {
-    const resolved = resolveHostname(target, ctx)
-    if (!resolved) return [err(`traceroute: ${target}: Name or service not known`)]
+  if (isResolveError(r)) return [...lines, err(resolveErrorText('traceroute', r), afterDns)]
+  const dst = r.node
+  const path = dst ? findPath(src.id, dst.id, ctx.nodes, ctx.edges) : null
+  if (!dst || !path) return [...lines, err(`traceroute to ${target}: no route to host`, afterDns)]
 
-    const cloudNode = resolved.cloudId ? nodeById(resolved.cloudId, ctx.nodes) : null
-    const cloudPath = cloudNode
-      ? findPath(src.id, cloudNode.id, ctx.nodes, ctx.edges)
-      : null
+  ctx.dispatchPackets?.(startAfter(makePacketsWithArp(src, dst, path, ctx, 'ICMP', 'ICMP'), afterDns))
 
-    // Animate DNS lookup, then ICMP probe packets towards the internet once DNS has answered
-    const dnsNode = ctx.nodes.find((n) => n.data.deviceType === 'dns')
-    const dnsPath = dnsNode ? findPath(src.id, dnsNode.id, ctx.nodes, ctx.edges) : null
-    let afterDns = 0
-    if (dnsPath && dnsNode) {
-      const dnsPackets = makePacketsWithArp(src, dnsNode, dnsPath, ctx, 'DNS', 'DNS', true)
-      afterDns = finishMs(dnsPackets)
-      ctx.dispatchPackets?.(dnsPackets)
-    }
-    if (cloudPath && cloudNode) {
-      ctx.dispatchPackets?.(startAfter(makePacketsWithArp(src, cloudNode, cloudPath, ctx, 'ICMP', 'ICMP'), afterDns))
-    }
-
-    const lines: Lines = [
-      info(`Resolving ${target} via DNS (${resolved.dnsIp})…`),
-      out(`traceroute to ${target} (${resolved.ip}), 30 hops max, 60 byte packets`),
-    ]
-
-    let hopNum = 1
-
-    // Local hops to the cloud/internet node
-    const WAN_SIDE_TYPES = ['router', 'gateway', 'cloud', 'firewall']
-    if (cloudPath && cloudPath.length > 1) {
-      cloudPath.slice(1).forEach((nodeId, i) => {
-        const node = nodeById(nodeId, ctx.nodes)
-        const prevNode = nodeById(cloudPath[i], ctx.nodes)
-        const fromWan = WAN_SIDE_TYPES.includes(prevNode?.data.deviceType ?? '')
-        const ip = (fromWan && node?.data.wanIp) ? node.data.wanIp : (node?.data.ip || node?.data.label || '*')
-        const label = node?.data.label ?? ''
-        const rtt = simulatePingRtt(i + 1)
-        lines.push(out(` ${hopNum}  ${ip} (${label})  ${rtt} ms  ${rtt + 1} ms  ${rtt} ms`))
-        hopNum++
-      })
-    }
-
-    // Simulated internet backbone hops
-    INTERNET_HOPS.forEach((hop, i) => {
-      const rtt = 15 + hopNum * 4 + i * 3 + Math.floor(Math.random() * 4)
-      lines.push(out(` ${hopNum}  ${hop.ip} (${hop.label})  ${rtt} ms  ${rtt + 2} ms  ${rtt + 1} ms`))
-      hopNum++
-    })
-
-    const finalRtt = 30 + Math.floor(Math.random() * 10)
-    lines.push(out(` ${hopNum}  ${resolved.ip} (${target})  ${finalRtt} ms  ${finalRtt + 1} ms  ${finalRtt} ms`))
-    return lines
-  }
-
-  // ── IP address branch ────────────────────────────────────────────────────
-  const dst = nodeByIp(target, ctx.nodes)
-  if (!dst) return [err(`traceroute to ${target}: host unreachable`)]
-
-  const path = findPath(src.id, dst.id, ctx.nodes, ctx.edges)
-  if (!path) return [err(`traceroute to ${target}: no route to host`)]
-
-  ctx.dispatchPackets?.(makePacketsWithArp(src, dst, path, ctx, 'ICMP', 'ICMP'))
-
+  const body: Lines = [out(`traceroute to ${target} (${r.ip}), 30 hops max, 60 byte packets`)]
   const WAN_SIDE_TYPES = ['router', 'gateway', 'cloud', 'firewall']
-  const lines: Lines = [out(`traceroute to ${target} (${target}), 30 hops max, 60 byte packets`)]
+  let hopNum = 1
   path.slice(1).forEach((nodeId, i) => {
     const node = nodeById(nodeId, ctx.nodes)
-    const prevNode = nodeById(path[i], ctx.nodes)
+    const prevNode = nodeById(path[i]!, ctx.nodes)
     const fromWan = WAN_SIDE_TYPES.includes(prevNode?.data.deviceType ?? '')
-    const ip = (fromWan && node?.data.wanIp) ? node.data.wanIp : (node?.data.ip ?? '*')
-    const label = node?.data.label ?? ''
+    const ip = (fromWan && node?.data.wanIp) ? node.data.wanIp : (node?.data.ip || node?.data.label || '*')
     const rtt = simulatePingRtt(i + 1)
-    lines.push(out(` ${i + 1}  ${ip} (${label})  ${rtt} ms  ${rtt + 1} ms  ${rtt} ms`))
+    body.push(out(` ${hopNum}  ${ip} (${node?.data.label ?? ''})  ${rtt} ms  ${rtt + 1} ms  ${rtt} ms`))
+    hopNum++
   })
-  return lines
+
+  if (dst.data.deviceType === 'cloud') {
+    // Simulated internet backbone hops, then the host itself
+    INTERNET_HOPS.forEach((hop, i) => {
+      const rtt = 15 + hopNum * 4 + i * 3 + Math.floor(Math.random() * 4)
+      body.push(out(` ${hopNum}  ${hop.ip} (${hop.label})  ${rtt} ms  ${rtt + 2} ms  ${rtt + 1} ms`))
+      hopNum++
+    })
+    const finalRtt = 30 + Math.floor(Math.random() * 10)
+    body.push(out(` ${hopNum}  ${r.ip} (${target})  ${finalRtt} ms  ${finalRtt + 1} ms  ${finalRtt} ms`))
+  }
+  return [...lines, ...delayLines(body, afterDns)]
 }
 
 function cmdIpconfig(args: string[], ctx: TermContext): Lines {
@@ -485,59 +184,38 @@ function cmdNslookup(args: string[], ctx: TermContext): Lines {
   const domain = args[0]
   if (!domain) return [err('Usage: nslookup <domain>')]
 
-  const src = self(ctx)
-  const dnsNode   = ctx.nodes.find((n) => n.data.deviceType === 'dns')
-  const cloudNode = ctx.nodes.find((n) => n.data.deviceType === 'cloud')
-
-  const dnsPath       = dnsNode   ? findPath(src.id, dnsNode.id,   ctx.nodes, ctx.edges) : null
-  const canReachDns   = !!dnsPath
-  const canReachCloud = !!(cloudNode && findPath(src.id, cloudNode.id, ctx.nodes, ctx.edges))
-
-  if (dnsPath && dnsNode) {
-    ctx.dispatchPackets?.(makePacketsWithArp(src, dnsNode, dnsPath, ctx, 'DNS', 'DNS', true))
-  }
-
-  if (!canReachDns && !canReachCloud) {
+  if (isIp(domain)) {
+    // Reverse lookup needs PTR records, which Networx's DNS server doesn't hold
+    const server = dnsServerFor(ctx)
+    if (!server) return [out('Server:   (none)'), out(''), err(';; connection timed out; no servers could be reached')]
+    const arpa = `${domain.split('.').reverse().join('.')}.in-addr.arpa`
     return [
-      out(`Server:   (none)`),
+      out(`Server:   ${server.ip}`),
+      out(`Address:  ${server.ip}#53`),
       out(''),
-      err(`;; connection timed out; no servers could be reached`),
+      out(`** server can't find ${arpa}: NXDOMAIN`),
     ]
   }
 
-  const dnsIp = canReachDns ? (dnsNode!.data.ip || '8.8.8.8') : '8.8.8.8'
+  const r = resolveTarget(domain, ctx)
+  const afterDns = animateDns(r, ctx)
 
-  // Check local DNS records first
-  const localRecord = canReachDns
-    ? (dnsNode!.data.dnsRecords ?? []).find(
-        (r) => r.hostname.toLowerCase() === domain.toLowerCase(),
-      )
-    : undefined
-
-  const resolvedIp = localRecord?.ip
-    ?? PUBLIC_IPS[domain]
-    ?? `93.184.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`
-
-  const lines: Lines = [
-    out(`Server:   ${dnsIp}`),
-    out(`Address:  ${dnsIp}#53`),
-    out(''),
-  ]
-
-  if (localRecord) {
-    lines.push(
-      out(`Name:     ${domain}`),
-      out(`Address:  ${resolvedIp}`),
-    )
-  } else {
-    lines.push(
-      out(`Non-authoritative answer:`),
-      out(`Name:     ${domain}`),
-      out(`Address:  ${resolvedIp}`),
-    )
+  if (!r.dnsServerIp) {
+    return [out('Server:   (none)'), out(''), err(';; connection timed out; no servers could be reached')]
   }
 
-  return lines
+  const lines: Lines = [
+    out(`Server:   ${r.dnsServerIp}`),
+    out(`Address:  ${r.dnsServerIp}#53`),
+    out(''),
+  ]
+  if (isResolveError(r)) {
+    lines.push(out(`** server can't find ${domain}: NXDOMAIN`))
+  } else {
+    if (!r.authoritative) lines.push(out('Non-authoritative answer:'))
+    lines.push(out(`Name:     ${domain}`), out(`Address:  ${r.ip}`))
+  }
+  return delayLines(lines, afterDns)
 }
 
 function cmdArp(args: string[], ctx: TermContext): Lines {
@@ -610,13 +288,13 @@ function cmdCurl(args: string[], ctx: TermContext): Lines {
   }
 
   // If hostname is an IP address and matches a reachable local web server, serve it
-  if (!isHostname(hostname) && localPath && webNode?.data.ip === hostname) {
+  if (!!isIp(hostname) && localPath && webNode?.data.ip === hostname) {
     ctx.dispatchPackets?.(makePacketsWithArp(src, webNode, localPath, ctx, 'HTTP', 'HTTP', true))
     return renderPage(webNode)
   }
 
   // If hostname is a domain, try to resolve it via the DNS node's local records
-  if (isHostname(hostname)) {
+  if (!isIp(hostname)) {
     const dnsNode = ctx.nodes.find((n) => n.data.deviceType === 'dns')
     const dnsPath = dnsNode ? findPath(src.id, dnsNode.id, ctx.nodes, ctx.edges) : null
     const localRecord = dnsPath
@@ -655,7 +333,7 @@ function cmdCurl(args: string[], ctx: TermContext): Lines {
   }
 
   // If local web server exists and is reachable, use it for any reachable host (fallback)
-  if (localPath && !isHostname(hostname)) {
+  if (localPath && !!isIp(hostname)) {
     ctx.dispatchPackets?.(makePacketsWithArp(src, webNode!, localPath, ctx, 'HTTP', 'HTTP', true))
     return renderPage(webNode)
   }
@@ -750,7 +428,7 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
     }
 
     // Build 4-way DHCP handshake animation: DISCOVER → OFFER → REQUEST → ACK
-    const legMs = (path.length - 1) * HOP_MS
+    const legMs = (path.length - 1) * scaledHop(HOP_MS)
     const dhcpPackets: PacketAnim[] = [
       ...leg(path, ctx.edges, 'UDP', 'DISCOVER', 0),               // client → router
       ...leg(path, ctx.edges, 'UDP', 'OFFER',    legMs, true),     // router → client
@@ -803,8 +481,9 @@ function cmdHelp(): Lines {
 
 // ─── Dispatcher ─────────────────────────────────────────────────────────────
 
-export function runCommand(raw: string, ctx: TermContext): TerminalLine[] {
-  const parts = raw.trim().split(/\s+/)
+export function runCommand(raw: string, baseCtx: TermContext): TerminalLine[] {
+  const ctx: TermContext = { ...baseCtx, arpSeen: new Set() }
+  const parts = tokenize(raw)
   const cmd = parts[0]?.toLowerCase() ?? ''
   const args = parts.slice(1)
 
