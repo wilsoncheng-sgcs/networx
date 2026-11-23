@@ -11,3 +11,6 @@ dist/
 # Vite
 *.local
 NETWORX_PROTOCOLS_SPEC.md
+
+# Acceptance-run output (node e2e/acceptance.mjs)
+e2e/screenshots/

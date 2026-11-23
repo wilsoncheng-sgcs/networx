@@ -1,11 +1,25 @@
 import { create } from 'zustand'
 import { addEdge, applyNodeChanges, applyEdgeChanges } from '@xyflow/react'
 import type { NodeChange, EdgeChange, Connection } from '@xyflow/react'
-import type { NetNode, NetEdge, NodeData, PanelType, RouteEntry, MacEntry, ArpEntry, FirewallRule, DnsRecord, TerminalLine, PacketAnim } from '../types'
-import { makeDefaultData } from '../simulation/defaults'
+import type { NetNode, NetEdge, NodeData, PanelType, RouteEntry, MacEntry, ArpEntry, FirewallRule, DnsRecord, TerminalLine, PacketAnim, AnimSpeed, CaptureRecord, PendingCapture, ConnRecord } from '../types'
+import { setAnimSpeed } from '../simulation/packets'
+import { makeDefaultData, normaliseNode } from '../simulation/defaults'
 import type { Preset } from '../simulation/presets'
 
 const STORAGE_KEY = 'networx-state-v1'
+const SPEED_KEY = 'networx-speed'
+const MAX_CAPTURES = 500
+const MAX_RECENT_CONNS = 10
+
+function loadSpeed(): AnimSpeed {
+  try {
+    const raw = localStorage.getItem(SPEED_KEY)
+    if (raw === 'instant') return 'instant'
+    const n = Number(raw)
+    if (n === 0.5 || n === 1 || n === 3) return n
+  } catch { /* storage unavailable */ }
+  return 1
+}
 
 let idCounter = 100
 function nextId(prefix: string) { return `${prefix}-${++idCounter}` }
@@ -15,7 +29,8 @@ function loadSaved(): { nodes: NetNode[]; edges: NetEdge[] } | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
-    return JSON.parse(raw) as { nodes: NetNode[]; edges: NetEdge[] }
+    const parsed = JSON.parse(raw) as { nodes: NetNode[]; edges: NetEdge[] }
+    return { nodes: (parsed.nodes ?? []).map(normaliseNode), edges: parsed.edges ?? [] }
   } catch {
     return null
   }
@@ -70,9 +85,29 @@ interface NetworkStore {
   addDnsRecord: (nodeId: string, record: DnsRecord) => void
   removeDnsRecord: (nodeId: string, id: string) => void
 
+  // Animation speed (toolbar). Persisted separately from the network.
+  animSpeed: AnimSpeed
+  setAnimSpeed: (speed: AnimSpeed) => void
+
   // Packet animations
   activePackets: PacketAnim[]
   dispatchPackets: (packets: PacketAnim[]) => void
+
+  // Packet capture (not persisted)
+  captures: CaptureRecord[]
+  captureOpen: boolean
+  captureStartMs: number
+  setCaptureOpen: (open: boolean) => void
+  clearCaptures: () => void
+  addCapture: (record: Omit<CaptureRecord, 'no' | 'timeMs'>) => void
+  dispatchCaptures: (records: PendingCapture[]) => void
+
+  // Recent TCP connections per node, newest first (not persisted; for netstat)
+  recentConns: Record<string, ConnRecord[]>
+  recordConnection: (nodeId: string, conn: ConnRecord) => void
+
+  // Bumped when a whole network is loaded, so the canvas re-fits the view
+  layoutVersion: number
 
   // Persistence & presets
   saveToStorage: () => void
@@ -81,6 +116,8 @@ interface NetworkStore {
 }
 
 const saved = loadSaved()
+const initialSpeed = loadSpeed()
+setAnimSpeed(initialSpeed)
 
 export const useNetworkStore = create<NetworkStore>((set, get) => ({
   nodes: saved?.nodes ?? [],
@@ -90,6 +127,12 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
   connectionType: 'wired',
   showLayers: false,
   activePackets: [],
+  animSpeed: initialSpeed,
+  captures: [],
+  captureOpen: false,
+  captureStartMs: Date.now(),
+  recentConns: {},
+  layoutVersion: 0,
 
   onNodesChange: (changes) =>
     set((s) => ({ nodes: applyNodeChanges(changes, s.nodes) })),
@@ -248,7 +291,15 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
       ),
     })),
 
+  setAnimSpeed: (speed) => {
+    setAnimSpeed(speed)
+    try { localStorage.setItem(SPEED_KEY, String(speed)) } catch { /* storage unavailable */ }
+    set({ animSpeed: speed })
+  },
+
   dispatchPackets: (packets) => {
+    // Instant: nothing animates
+    if (get().animSpeed === 'instant') return
     // Stagger each packet's appearance via setTimeout so animateMotion starts at t=0
     packets.forEach((packet) => {
       setTimeout(() => {
@@ -260,6 +311,32 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
     })
   },
 
+  setCaptureOpen: (open) => set({ captureOpen: open }),
+
+  clearCaptures: () => set({ captures: [], captureStartMs: Date.now() }),
+
+  addCapture: (record) =>
+    set((s) => {
+      const no = (s.captures[s.captures.length - 1]?.no ?? 0) + 1
+      const full: CaptureRecord = { ...record, no, timeMs: Date.now() - s.captureStartMs }
+      return { captures: [...s.captures, full].slice(-MAX_CAPTURES) }
+    }),
+
+  dispatchCaptures: (records) => {
+    // Each record appears when its packet leaves, so the list grows in time with the animation
+    records.forEach(({ delayMs, ...record }) => {
+      setTimeout(() => get().addCapture(record), delayMs)
+    })
+  },
+
+  recordConnection: (nodeId, conn) =>
+    set((s) => ({
+      recentConns: {
+        ...s.recentConns,
+        [nodeId]: [conn, ...(s.recentConns[nodeId] ?? [])].slice(0, MAX_RECENT_CONNS),
+      },
+    })),
+
   saveToStorage: () => {
     const { nodes, edges } = get()
     try {
@@ -269,8 +346,10 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
 
   loadPreset: (preset) => {
     set({
-      nodes: preset.nodes,
+      nodes: preset.nodes.map(normaliseNode),
       edges: preset.edges,
+      layoutVersion: get().layoutVersion + 1,
+      recentConns: {},
       selectedNodeId: null,
       activePanel: null,
     })

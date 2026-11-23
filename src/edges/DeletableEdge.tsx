@@ -3,15 +3,8 @@ import { BaseEdge, EdgeLabelRenderer, getBezierPath } from '@xyflow/react'
 import type { EdgeProps } from '@xyflow/react'
 import { useNetworkStore } from '../store'
 import type { PacketAnim } from '../types'
+import { PROTOCOL_COLORS } from '../components/protocolColors'
 
-const PROTOCOL_COLORS: Record<string, string> = {
-  ARP:  '#16a34a',  // green
-  ICMP: '#f97316',  // orange
-  HTTP: '#2563eb',  // blue
-  DNS:  '#9333ea',  // purple
-  TCP:  '#0891b2',  // cyan
-  UDP:  '#d97706',  // amber
-}
 
 // Separate component so useEffect fires correctly on mount
 function PacketDot({ edgePath, packet }: { edgePath: string; packet: PacketAnim }) {

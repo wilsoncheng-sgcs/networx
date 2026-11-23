@@ -3,7 +3,7 @@ import type { NetNode } from '../types'
 import { useNetworkStore } from '../store'
 import {
   Monitor, Server, Router, Zap, Wifi, Shield, Globe,
-  Laptop, HardDrive, Settings, Terminal as TermIcon, Cloud, Home,
+  Laptop, HardDrive, Settings, Terminal as TermIcon, Cloud, Home, Mail, FolderOpen,
 } from 'lucide-react'
 
 const DEVICE_CONFIG = {
@@ -19,9 +19,14 @@ const DEVICE_CONFIG = {
   dns:      { icon: Globe,     color: '#0284c7', bg: '#e0f2fe', label: 'DNS' },
   web:      { icon: Globe,     color: '#16a34a', bg: '#dcfce7', label: 'Web Server' },
   cloud:    { icon: Cloud,     color: '#0369a1', bg: '#f0f9ff', label: 'Internet' },
+  mail:     { icon: Mail,      color: '#be185d', bg: '#fce7f3', label: 'Mail Server' },
+  file:     { icon: FolderOpen, color: '#a16207', bg: '#fef9c3', label: 'File Server' },
 } as const
 
 export type DeviceType = keyof typeof DEVICE_CONFIG
+
+/** Device types that have a Terminal tab. */
+export const TERMINAL_TYPES: string[] = ['pc', 'laptop', 'server', 'dns', 'web', 'mail', 'file']
 
 const HANDLE_STYLE = {
   width: 10,
@@ -36,6 +41,8 @@ const LAYER_INFO: Record<string, { label: string; color: string; bg: string }> =
   server:   { label: 'L4 Application', color: '#1d4ed8', bg: '#dbeafe' },
   dns:      { label: 'L4 Application', color: '#1d4ed8', bg: '#dbeafe' },
   web:      { label: 'L4 Application', color: '#1d4ed8', bg: '#dbeafe' },
+  mail:     { label: 'L4 Application', color: '#1d4ed8', bg: '#dbeafe' },
+  file:     { label: 'L4 Application', color: '#1d4ed8', bg: '#dbeafe' },
   router:   { label: 'L2 Internet',    color: '#dc2626', bg: '#fee2e2' },
   firewall: { label: 'L2–L3',          color: '#dc2626', bg: '#fee2e2' },
   gateway:  { label: 'L1–L2',          color: '#0f766e', bg: '#ccfbf1' },
@@ -49,7 +56,7 @@ export default function DeviceNode({ id, data, selected }: NodeProps<NetNode>) {
   const { setPanel, selectNode, showLayers } = useNetworkStore()
   const cfg = DEVICE_CONFIG[data.deviceType] ?? DEVICE_CONFIG.pc
   const Icon = cfg.icon
-  const hasTerminal = ['pc', 'laptop', 'server', 'dns', 'web'].includes(data.deviceType)
+  const hasTerminal = TERMINAL_TYPES.includes(data.deviceType)
   const isCloud = data.deviceType === 'cloud'
 
   function openConfig() {

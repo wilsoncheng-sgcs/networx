@@ -15,10 +15,10 @@ function renderMarkdown(text: string): string {
     .replace(/^### (.+)$/gm, '<h3 class="font-bold text-gray-800 mt-4 mb-1">$1</h3>')
     .replace(/^## (.+)$/gm, '<h2 class="font-bold text-gray-800 mt-4 mb-2 text-base">$1</h2>')
     .replace(/^\| (.+) \|$/gm, (_, row) => {
-      const cells = row.split(' | ').map((c: string) => `<td class="border border-gray-200 px-2 py-0.5 text-xs">${c}</td>`).join('')
+      const cells = row.split(' | ').map((c: string) => `<td class="border border-gray-200 px-1.5 py-0.5 text-xs align-top">${c}</td>`).join('')
       return `<tr>${cells}</tr>`
     })
-    .replace(/(<tr>.*<\/tr>)/gs, '<table class="border-collapse w-full my-2 text-xs">$1</table>')
+    .replace(/(<tr>.*<\/tr>)/gs, '<div class="overflow-x-auto"><table class="border-collapse w-full my-2 text-xs">$1</table></div>')
     .replace(/^- (.+)$/gm, '<li class="ml-4 text-sm">• $1</li>')
     .replace(/\n\n/g, '</p><p class="mb-2 text-sm text-gray-700">')
 }

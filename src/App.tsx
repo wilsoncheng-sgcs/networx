@@ -12,19 +12,20 @@ import '@xyflow/react/dist/style.css'
 import {
   BookOpen, Cable, Wifi, Trash2, HelpCircle,
   ChevronRight, ChevronLeft, Save, LayoutGrid, Check, X as XIcon,
-  Upload, Layers,
+  Upload, Layers, Gauge, Radio,
 } from 'lucide-react'
 
 import { useNetworkStore } from './store'
-import DeviceNode from './nodes/DeviceNode'
+import DeviceNode, { TERMINAL_TYPES } from './nodes/DeviceNode'
 import DeletableEdge from './edges/DeletableEdge'
 import DevicePalette from './components/DevicePalette'
 import ConfigPanel from './components/ConfigPanel'
 import Terminal from './components/Terminal'
 import Browser from './components/Browser'
 import InfoPanel from './components/InfoPanel'
+import CaptureDrawer from './components/CaptureDrawer'
 import { PRESETS } from './simulation/presets'
-import type { DeviceType, NetNode } from './types'
+import type { DeviceType, NetNode, AnimSpeed } from './types'
 
 const nodeTypes = { device: DeviceNode }
 const edgeTypes = { default: DeletableEdge }
@@ -36,10 +37,33 @@ function NetworkCanvas() {
     nodes, edges,
     onNodesChange, onEdgesChange, onConnect,
     addDevice, selectNode, saveToStorage,
-    setPanel,
+    setPanel, layoutVersion, captureOpen,
   } = useNetworkStore()
 
-  const { screenToFlowPosition } = useReactFlow()
+  const { screenToFlowPosition, fitView } = useReactFlow()
+
+  // Keep a loaded network fitted to the canvas as panels and the capture drawer open and close,
+  // until the user pans or zooms it themselves. Loading a preset or import fits it again.
+  const wrapperRef = useRef<HTMLDivElement>(null)
+  const autoFit = useRef(true)
+  useEffect(() => {
+    autoFit.current = true
+    if (layoutVersion === 0) return
+    const t = setTimeout(() => fitView({ padding: 0.12, duration: 200 }), 50)
+    return () => clearTimeout(t)
+  }, [layoutVersion, fitView])
+  useEffect(() => {
+    const el = wrapperRef.current
+    if (!el) return
+    let t: ReturnType<typeof setTimeout> | undefined
+    const ro = new ResizeObserver(() => {
+      if (!autoFit.current) return
+      clearTimeout(t)
+      t = setTimeout(() => fitView({ padding: 0.12 }), 60)
+    })
+    ro.observe(el)
+    return () => { ro.disconnect(); clearTimeout(t) }
+  }, [fitView])
 
   // Auto-save 1.5 s after last change
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -73,7 +97,7 @@ function NetworkCanvas() {
   }
 
   return (
-    <div className="flex-1 relative" onDrop={handleDrop} onDragOver={handleDragOver}>
+    <div ref={wrapperRef} className="flex-1 relative min-h-0" onDrop={handleDrop} onDragOver={handleDragOver}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -84,6 +108,7 @@ function NetworkCanvas() {
         onConnect={onConnect}
         onNodeClick={handleNodeClick}
         onPaneClick={handlePaneClick}
+        onMoveStart={(event) => { if (event) autoFit.current = false }}
         fitView
         fitViewOptions={{ padding: 0.2 }}
         deleteKeyCode="Delete"
@@ -98,12 +123,13 @@ function NetworkCanvas() {
               pc: '#2563eb', laptop: '#7c3aed', server: '#059669',
               router: '#dc2626', switch: '#d97706', hub: '#6b7280',
               wap: '#0891b2', firewall: '#9333ea', dns: '#0284c7',
-              web: '#16a34a', cloud: '#0369a1',
+              web: '#16a34a', cloud: '#0369a1', gateway: '#0f766e',
+              mail: '#be185d', file: '#a16207',
             }
             const node = n as NetNode
             return colors[node.data?.deviceType ?? ''] ?? '#6b7280'
           }}
-          style={{ background: '#f9fafb' }}
+          style={{ background: '#f9fafb', width: captureOpen ? 120 : 200, height: captureOpen ? 80 : 150 }}
         />
       </ReactFlow>
 
@@ -279,6 +305,55 @@ function SaveButton() {
   )
 }
 
+// ─── Animation speed ──────────────────────────────────────────────────────────
+
+const SPEEDS: Array<{ value: AnimSpeed; label: string }> = [
+  { value: 0.5, label: 'Slow' },
+  { value: 1, label: 'Normal' },
+  { value: 3, label: 'Fast' },
+  { value: 'instant', label: 'Instant' },
+]
+
+function SpeedControl() {
+  const { animSpeed, setAnimSpeed } = useNetworkStore()
+  return (
+    <label className="flex items-center gap-1.5 text-sm text-gray-600" title="Packet animation speed (Normal for the projector, Fast for students)">
+      <Gauge size={14} />
+      <span className="sr-only 2xl:not-sr-only">Speed</span>
+      <select
+        className="border border-gray-200 rounded-md px-1.5 py-1 text-sm bg-white outline-none focus:ring-2 focus:ring-blue-300"
+        value={String(animSpeed)}
+        onChange={(e) => {
+          const v = e.target.value
+          setAnimSpeed(v === 'instant' ? 'instant' : (Number(v) as AnimSpeed))
+        }}
+        data-testid="speed-select"
+      >
+        {SPEEDS.map((s) => <option key={s.label} value={String(s.value)}>{s.label}</option>)}
+      </select>
+    </label>
+  )
+}
+
+function CaptureToggle() {
+  const { captureOpen, setCaptureOpen, captures } = useNetworkStore()
+  return (
+    <button
+      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+        captureOpen ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-200' : 'text-gray-600 hover:bg-gray-50'
+      }`}
+      onClick={() => setCaptureOpen(!captureOpen)}
+      title="Packet capture: see every packet, its ports and whether it is readable"
+      data-testid="capture-toggle"
+    >
+      <Radio size={14} /> Capture
+      {!captureOpen && captures.length > 0 && (
+        <span className="text-[10px] bg-rose-100 text-rose-700 rounded-full px-1.5 leading-4 tabular-nums">{captures.length}</span>
+      )}
+    </button>
+  )
+}
+
 // ─── Toolbar ──────────────────────────────────────────────────────────────────
 
 interface ToolbarProps {
@@ -337,7 +412,8 @@ function Toolbar({ connectionType, setConnectionType, onDeleteSelected, onShowIn
         </>
       )}
 
-      <div className="ml-auto flex items-center gap-2">
+      <div className="ml-auto flex items-center gap-1.5">
+        <SpeedControl />
         <button
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
             showLayers ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200' : 'text-gray-600 hover:bg-gray-50'
@@ -347,6 +423,7 @@ function Toolbar({ connectionType, setConnectionType, onDeleteSelected, onShowIn
         >
           <Layers size={14} /> Layers
         </button>
+        <CaptureToggle />
         <button
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
             infoOpen ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'
@@ -360,8 +437,18 @@ function Toolbar({ connectionType, setConnectionType, onDeleteSelected, onShowIn
           target="_blank"
           rel="noopener noreferrer"
           className="text-gray-400 hover:text-gray-600 transition-colors p-1"
+          title="Networx by Miles Berry (original project)"
         >
           <HelpCircle size={16} />
+        </a>
+        <a
+          href="https://github.com/wilsoncheng-sgcs/networx#sgcs-extensions"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-[11px] font-semibold text-gray-400 hover:text-gray-600 transition-colors px-1"
+          title="About the SGCS protocols extension"
+        >
+          SGCS
         </a>
       </div>
     </header>
@@ -373,7 +460,7 @@ function Toolbar({ connectionType, setConnectionType, onDeleteSelected, onShowIn
 function SidePanel() {
   const { nodes, selectedNodeId, activePanel, setPanel } = useNetworkStore()
   const node = nodes.find((n) => n.id === selectedNodeId)
-  const hasTerminal = node && ['pc', 'laptop', 'server', 'dns', 'web'].includes(node.data.deviceType)
+  const hasTerminal = node && TERMINAL_TYPES.includes(node.data.deviceType)
   const hasBrowser  = node && ['pc', 'laptop', 'server'].includes(node.data.deviceType)
 
   if (!activePanel) return null
@@ -437,7 +524,7 @@ function AppInner() {
     addDevice, selectNode, deleteSelected,
     connectionType, setConnectionType,
     selectedNodeId, activePanel, setPanel,
-    showLayers, toggleLayers,
+    showLayers, toggleLayers, captureOpen,
   } = useNetworkStore()
 
   const [infoOpen, setInfoOpen] = useState(false)
@@ -486,7 +573,10 @@ function AppInner() {
             : <ChevronRight size={14} className="text-gray-500" />}
         </button>
 
-        <NetworkCanvas />
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          <NetworkCanvas />
+          {captureOpen && <CaptureDrawer />}
+        </div>
 
         {activePanel && <SidePanel />}
       </div>

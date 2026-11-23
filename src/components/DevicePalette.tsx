@@ -1,4 +1,4 @@
-import { Monitor, Server, Router, Zap, Wifi, Shield, Globe, Laptop, HardDrive, Cloud, Home } from 'lucide-react'
+import { Monitor, Server, Router, Zap, Wifi, Shield, Globe, Laptop, HardDrive, Cloud, Home, Mail, FolderOpen } from 'lucide-react'
 import type { DeviceType } from '../types'
 
 interface DeviceDef {
@@ -21,6 +21,8 @@ const DEVICES: DeviceDef[] = [
   { type: 'gateway',  label: 'Home Gateway', icon: Home,      color: '#0f766e', bg: '#ccfbf1', description: 'Router + switch + Wi-Fi + firewall' },
   { type: 'dns',      label: 'DNS Server',   icon: Globe,     color: '#0284c7', bg: '#e0f2fe', description: 'Resolves domain names' },
   { type: 'web',      label: 'Web Server',   icon: Globe,     color: '#16a34a', bg: '#dcfce7', description: 'Serves HTTP pages' },
+  { type: 'mail',     label: 'Mail Server',  icon: Mail,      color: '#be185d', bg: '#fce7f3', description: 'Sends and stores email' },
+  { type: 'file',     label: 'File Server',  icon: FolderOpen, color: '#a16207', bg: '#fef9c3', description: 'Stores and transfers files' },
   { type: 'cloud',    label: 'Internet',     icon: Cloud,     color: '#0369a1', bg: '#f0f9ff', description: 'WAN / ISP cloud' },
   { type: 'hub',      label: 'Hub',          icon: Zap,       color: '#6b7280', bg: '#f3f4f6', description: 'Broadcasts to all ports' },
 ]

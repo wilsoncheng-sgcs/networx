@@ -42,11 +42,35 @@ Spec links:
 - [GCSE J277](https://www.ocr.org.uk/Images/558027-specification-gcse-computer-science-j277.pdf)
 - [A Level H446](https://www.ocr.org.uk/images/170844-specification-accredited-a-level-gce-computer-science-h446.pdf)
 
+## SGCS extensions
+
+This fork ([wilsoncheng-sgcs/networx](https://github.com/wilsoncheng-sgcs/networx)) extends the original
+[milesberry/networx](https://github.com/milesberry/networx) for **NSW Stage 6 Software Engineering (Year 12)**,
+for the dot point *“Investigate and describe the function of web protocols and their ports: HTTP, HTTPS, TCP/IP,
+DNS, FTP, SFTP, SSL, TLS, SMTP, POP3, IMAP”* (SE-12-03). It adds:
+
+- **Ports everywhere** — a single services table (`src/simulation/services.ts`); every packet carries a client
+  (ephemeral) port and a server (well-known) port
+- **Packet capture** — a Wireshark-style drawer listing every packet with source/destination `IP:port`, protocol,
+  length and info, and a layer-by-layer detail pane; encrypted traffic shows only ciphertext
+- **TCP three-way handshake**, **DNS over UDP 53** (unknown names now return NXDOMAIN) and **TLS 1.3** for HTTPS
+- **`curl -v`** in the style of curl 8 on macOS, with ⓘ teaching notes, and a browser padlock / *Not secure* chip
+- **File Server** with `ftp` (ports 21 and 20, readable) and `sftp` (inside SSH on 22, encrypted)
+- **Mail Server** with `smtp` (587, AUTH PLAIN shown as Base64), `pop3` (110) and `imap` (143), plus `--tls`
+  variants on 465, 995 and 993, and `mail` to read downloaded messages
+- **Services tab** on servers, `ss` and a real `netstat`
+- **Animation speed** control and terminal output timed to the packets (control+C stops it)
+- **CareConnect** preset (fictional clinic on `careconnect.example`) for the lesson's labs
+- Vitest unit tests: `npm run test`
+
+The original copyright and MIT licence are unchanged.
+
 ## Running locally
 
 ```bash
 npm install
 npm run dev
+npm run test   # unit tests (Vitest)
 ```
 
 Requires Node 18+.
