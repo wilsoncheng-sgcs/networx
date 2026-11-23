@@ -5,6 +5,7 @@ import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, first
 import { resolveTarget, isResolveError, isIp, dnsServerFor, type Resolution } from './resolve'
 import { tokenize } from './tokenize'
 import { dnsConversation, runConversations } from './exchange'
+import { cmdCurl } from './protocols/web'
 
 export type { TermContext } from './context'
 export { makePackets, makePacketsWithArp, edgesOnPath, finishMs, startAfter } from './packets'
@@ -277,97 +278,6 @@ function cmdNetstat(_args: string[], ctx: TermContext): Lines {
   })
   if (lines.length === 2) lines.push(out('(no connections)'))
   return lines
-}
-
-function cmdCurl(args: string[], ctx: TermContext): Lines {
-  const url = args[0]
-  if (!url) return [err('Usage: curl <url>')]
-
-  const hostname = url.replace(/^https?:\/\//, '').split('/')[0]
-  const src = self(ctx)
-
-  // Check for a local web server first
-  const webNode = ctx.nodes.find((n) => n.data.deviceType === 'web')
-  const localPath = webNode ? findPath(src.id, webNode.id, ctx.nodes, ctx.edges) : null
-
-  // Helper: render page content as terminal lines
-  function renderPage(node: typeof webNode): Lines {
-    const content = (node?.data.pageContent || '').trim() || '<h1>Welcome</h1>'
-    const bytes = content.length
-    return [
-      out(`  % Total    % Received % Xferd  Average Speed   Time`),
-      out(`100  ${bytes.toString().padStart(4)}  100  ${bytes.toString().padStart(4)}    0     0   5120      0 --:--:-- --:--:--`),
-      out(''),
-      ...content.split('\n').map((line) => out(line)),
-    ]
-  }
-
-  // If hostname is an IP address and matches a reachable local web server, serve it
-  if (!!isIp(hostname) && localPath && webNode?.data.ip === hostname) {
-    ctx.dispatchPackets?.(makePacketsWithArp(src, webNode, localPath, ctx, 'HTTP', 'HTTP', true))
-    return renderPage(webNode)
-  }
-
-  // If hostname is a domain, try to resolve it via the DNS node's local records
-  if (!isIp(hostname)) {
-    const dnsNode = ctx.nodes.find((n) => n.data.deviceType === 'dns')
-    const dnsPath = dnsNode ? findPath(src.id, dnsNode.id, ctx.nodes, ctx.edges) : null
-    const localRecord = dnsPath
-      ? (dnsNode!.data.dnsRecords ?? []).find(
-          (r) => r.hostname.toLowerCase() === hostname.toLowerCase(),
-        )
-      : undefined
-
-    if (localRecord) {
-      // Resolved locally — find the web server with that IP
-      const targetWeb = ctx.nodes.find(
-        (n) => n.data.deviceType === 'web' && n.data.ip === localRecord.ip,
-      )
-      const targetPath = targetWeb ? findPath(src.id, targetWeb.id, ctx.nodes, ctx.edges) : null
-      // DNS query and answer first, then the HTTP request to the address it returned
-      let afterDns = 0
-      if (dnsPath && dnsNode) {
-        const dnsPackets = makePacketsWithArp(src, dnsNode, dnsPath, ctx, 'DNS', 'DNS', true)
-        afterDns = finishMs(dnsPackets)
-        ctx.dispatchPackets?.(dnsPackets)
-      }
-      if (targetPath && targetWeb) {
-        ctx.dispatchPackets?.(startAfter(makePacketsWithArp(src, targetWeb, targetPath, ctx, 'HTTP', 'HTTP', true), afterDns))
-        return renderPage(targetWeb)
-      }
-      return [err(`curl: (7) Failed to connect to ${hostname} (${localRecord.ip}): No route to host`)]
-    }
-  }
-
-  // External URL — need internet access
-  const cloudNode = ctx.nodes.find((n) => n.data.deviceType === 'cloud')
-  const canReachInternet = cloudNode && findPath(src.id, cloudNode.id, ctx.nodes, ctx.edges)
-
-  if (!canReachInternet) {
-    return [err(`curl: (6) Could not resolve host: ${hostname}`)]
-  }
-
-  // If local web server exists and is reachable, use it for any reachable host (fallback)
-  if (localPath && !!isIp(hostname)) {
-    ctx.dispatchPackets?.(makePacketsWithArp(src, webNode!, localPath, ctx, 'HTTP', 'HTTP', true))
-    return renderPage(webNode)
-  }
-
-  ctx.dispatchPackets?.(
-    makePacketsWithArp(src, cloudNode!, canReachInternet, ctx, 'HTTP', 'HTTP', true),
-  )
-
-  return [
-    out(`  % Total    % Received % Xferd  Average Speed   Time`),
-    out(`100  1256  100  1256    0     0  12560      0 --:--:-- --:--:--`),
-    out(''),
-    out(`<!DOCTYPE html>`),
-    out(`<html><head><title>${hostname}</title></head>`),
-    out(`<body>`),
-    out(`<h1>Welcome to ${hostname}</h1>`),
-    out(`<p>This is a simulated response from the internet.</p>`),
-    out(`</body></html>`),
-  ]
 }
 
 function cmdRoute(_args: string[], ctx: TermContext): Lines {

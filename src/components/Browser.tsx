@@ -1,181 +1,132 @@
-import { useState, useCallback, useRef } from 'react'
-import { ArrowLeft, ArrowRight, RotateCw, Globe, X } from 'lucide-react'
+import { useState, useCallback, useRef, useEffect } from 'react'
+import { ArrowLeft, ArrowRight, RotateCw, Globe, X, Lock } from 'lucide-react'
 import { useNetworkStore } from '../store'
-import { findPath } from '../simulation/network'
-import { makePacketsWithArp, PUBLIC_IPS } from '../simulation/terminal'
+import { fetchUrl, parseUrl, BROWSER_USER_AGENT } from '../simulation/protocols/web'
 
 interface Props {
   nodeId: string
 }
 
 interface LoadedPage {
-  url: string
+  url: string        // with scheme, as shown in the address bar
+  host: string
+  secure: boolean    // HTTPS with a valid certificate
+  issuer?: string
   content: string
   title: string
 }
 
-function isIp(s: string): boolean {
-  return /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(s)
-}
-
-function extractHostname(url: string): string {
-  return url.replace(/^https?:\/\//, '').split('/')[0].split(':')[0]
+interface LoadError {
+  url: string
+  kind: 'refused' | 'unresolved' | 'unreachable'
+  message: string
 }
 
 export default function Browser({ nodeId }: Props) {
-  const { nodes, edges, learnMac, learnArp, dispatchPackets } = useNetworkStore()
+  const { nodes, edges, learnMac, learnArp, dispatchPackets, dispatchCaptures, recordConnection } = useNetworkStore()
   const [addressInput, setAddressInput] = useState('')
   const [page, setPage] = useState<LoadedPage | null>(null)
   const [history, setHistory] = useState<LoadedPage[]>([])
   const [historyIndex, setHistoryIndex] = useState(-1)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<LoadError | null>(null)
+  const [loading, setLoading] = useState<string | null>(null)
+  const [showSecurity, setShowSecurity] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const loadTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => () => { if (loadTimer.current) clearTimeout(loadTimer.current) }, [])
 
   const navigate = useCallback((rawUrl: string, pushHistory = true) => {
-    const url = rawUrl.trim()
-    if (!url) return
+    const raw = rawUrl.trim()
+    if (!raw || loading) return
+    const parsed = parseUrl(raw)
+    setShowSecurity(false)
+    if (!parsed) {
+      setPage(null)
+      setError({ url: raw, kind: 'unresolved', message: `${raw} is not a valid web address.` })
+      return
+    }
+    setAddressInput(parsed.href)
 
-    const hostname = extractHostname(url)
-    const src = nodes.find((n) => n.id === nodeId)
-    if (!src) return
+    // The same Conversations as curl: DNS, TCP, (TLS), HTTP — without the terminal lines
+    const result = fetchUrl(parsed.href, {
+      selfId: nodeId, nodes, edges, learnMac, learnArp, dispatchPackets, dispatchCaptures, recordConnection,
+    }, { userAgent: BROWSER_USER_AGENT, withLines: false })
 
+    setLoading(parsed.host)
     setError(null)
-
-    // ── Resolve hostname → IP ────────────────────────────────────────────────
-    let targetIp = hostname
-
-    if (!isIp(hostname)) {
-      // Try local DNS records first
-      const dnsNode = nodes.find((n) => n.data.deviceType === 'dns')
-      const dnsPath = dnsNode ? findPath(nodeId, dnsNode.id, nodes, edges) : null
-
-      if (dnsPath && dnsNode) {
-        const record = (dnsNode.data.dnsRecords ?? []).find(
-          (r) => r.hostname.toLowerCase() === hostname.toLowerCase(),
-        )
-        if (record) {
-          // Animate DNS lookup
-          dispatchPackets(makePacketsWithArp(src, dnsNode, dnsPath, {
-            selfId: src.id, nodes, edges, learnMac, learnArp,
-          }, 'DNS', 'DNS', true))
-          targetIp = record.ip
-        } else if (PUBLIC_IPS[hostname]) {
-          // Known external hostname
-          dispatchPackets(makePacketsWithArp(src, dnsNode, dnsPath, {
-            selfId: src.id, nodes, edges, learnMac, learnArp,
-          }, 'DNS', 'DNS', true))
-          targetIp = PUBLIC_IPS[hostname]
-        } else {
-          setError(`This site can't be reached\n\n${hostname} could not be resolved.\n\nCheck the DNS server's A records.`)
-          return
+    if (loadTimer.current) clearTimeout(loadTimer.current)
+    // Show the page when its last packet arrives
+    loadTimer.current = setTimeout(() => {
+      setLoading(null)
+      if (!result.ok) {
+        setPage(null)
+        const host = parsed.host
+        switch (result.failure) {
+          case 'refused':
+            setError({ url: parsed.href, kind: 'refused', message: `${host} refused to connect.\n\nNothing is listening on port ${parsed.port} (${parsed.scheme.toUpperCase()}) at ${result.ip}.\n\nERR_CONNECTION_REFUSED` })
+            break
+          case 'nxdomain':
+            setError({ url: parsed.href, kind: 'unresolved', message: `${host}'s server IP address could not be found.\n\nThe DNS server answered: no such name (NXDOMAIN). Check the spelling, or the DNS server's A records.\n\nDNS_PROBE_FINISHED_NXDOMAIN` })
+            break
+          case 'no-dns':
+            setError({ url: parsed.href, kind: 'unresolved', message: `${host} could not be resolved.\n\nNo DNS server is reachable from this device.` })
+            break
+          default:
+            setError({ url: parsed.href, kind: 'unreachable', message: `${host} is not reachable from this device.\n\nCheck the network connections.` })
         }
-      } else if (PUBLIC_IPS[hostname]) {
-        // No DNS node but it's a known external name — check for cloud
-        targetIp = PUBLIC_IPS[hostname]
-      } else {
-        setError(`This site can't be reached\n\n${hostname} could not be resolved.\n\nNo DNS server is reachable from this device.`)
         return
       }
-    }
-
-    // ── Find matching local web server ───────────────────────────────────────
-    const webNode = nodes.find((n) => n.data.deviceType === 'web' && n.data.ip === targetIp)
-
-    if (webNode) {
-      const path = findPath(nodeId, webNode.id, nodes, edges)
-      if (!path) {
-        setError(`This site can't be reached\n\n${hostname} (${targetIp}) is not reachable from this device.\n\nCheck the network connections.`)
-        return
+      const content = result.body ?? ''
+      const title = content.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] ?? parsed.host
+      const loaded: LoadedPage = {
+        url: parsed.href,
+        host: parsed.host,
+        secure: parsed.scheme === 'https' && !!result.cert,
+        issuer: result.cert?.issuer.replace(/^CN=/, ''),
+        content,
+        title,
       }
-      // Animate HTTP request
-      dispatchPackets(makePacketsWithArp(src, webNode, path, {
-        selfId: src.id, nodes, edges, learnMac, learnArp,
-      }, 'HTTP', 'HTTP', true))
-
-      const content = webNode.data.pageContent?.trim() || '<html><body><h1>Empty Page</h1></body></html>'
-      const titleMatch = content.match(/<title[^>]*>([^<]*)<\/title>/i)
-      const title = titleMatch?.[1] ?? hostname
-
-      const loaded: LoadedPage = { url, content, title }
       setPage(loaded)
-      setAddressInput(url)
-
       if (pushHistory) {
-        const newHistory = [...history.slice(0, historyIndex + 1), loaded]
-        setHistory(newHistory)
-        setHistoryIndex(newHistory.length - 1)
+        const next = [...history.slice(0, historyIndex + 1), loaded]
+        setHistory(next)
+        setHistoryIndex(next.length - 1)
       }
-      return
-    }
+    }, result.endMs)
+  }, [nodeId, nodes, edges, learnMac, learnArp, dispatchPackets, dispatchCaptures, recordConnection, history, historyIndex, loading])
 
-    // ── No local web server — check for internet access ──────────────────────
-    const cloudNode = nodes.find((n) => n.data.deviceType === 'cloud')
-    const cloudPath = cloudNode ? findPath(nodeId, cloudNode.id, nodes, edges) : null
-
-    if (cloudPath) {
-      // Simulate external page
-      dispatchPackets(makePacketsWithArp(src, cloudNode!, cloudPath, {
-        selfId: src.id, nodes, edges, learnMac, learnArp,
-      }, 'HTTP', 'HTTP', true))
-      const content = `<!DOCTYPE html>
-<html>
-<head><title>${hostname}</title></head>
-<body style="font-family:sans-serif;padding:24px;color:#333">
-<p style="color:#888;font-size:12px">Simulated internet page — NetworX</p>
-<h1>${hostname}</h1>
-<p>This is a simulated response from the public internet.</p>
-<p>The real <strong>${hostname}</strong> (${targetIp}) cannot be shown here.</p>
-<p>To serve a custom page, add a <em>Web Server</em> node to your network with IP <code>${targetIp}</code>.</p>
-</body>
-</html>`
-      const loaded: LoadedPage = { url, content, title: hostname }
-      setPage(loaded)
-      setAddressInput(url)
-      if (pushHistory) {
-        const newHistory = [...history.slice(0, historyIndex + 1), loaded]
-        setHistory(newHistory)
-        setHistoryIndex(newHistory.length - 1)
-      }
-      return
-    }
-
-    setError(`This site can't be reached\n\n${hostname} (${targetIp}) — no web server found at this address and no internet connection available.`)
-  }, [nodeId, nodes, edges, learnMac, learnArp, dispatchPackets, history, historyIndex])
+  function show(p: LoadedPage, index: number) {
+    setHistoryIndex(index)
+    setPage(p)
+    setAddressInput(p.url)
+    setError(null)
+    setShowSecurity(false)
+  }
 
   function goBack() {
-    if (historyIndex <= 0) return
-    const newIndex = historyIndex - 1
-    const prev = history[newIndex]
-    if (!prev) return
-    setHistoryIndex(newIndex)
-    setPage(prev)
-    setAddressInput(prev.url)
-    setError(null)
+    const prev = history[historyIndex - 1]
+    if (prev) show(prev, historyIndex - 1)
   }
 
   function goForward() {
-    if (historyIndex >= history.length - 1) return
-    const newIndex = historyIndex + 1
-    const next = history[newIndex]
-    if (!next) return
-    setHistoryIndex(newIndex)
-    setPage(next)
-    setAddressInput(next.url)
-    setError(null)
+    const next = history[historyIndex + 1]
+    if (next) show(next, historyIndex + 1)
   }
 
   function reload() {
     if (page) navigate(page.url, false)
+    else if (error) navigate(error.url, false)
   }
 
   const canBack = historyIndex > 0
   const canForward = historyIndex < history.length - 1
+  const editing = !page || addressInput !== page.url
 
   return (
     <div className="flex flex-col h-full bg-gray-100">
       {/* Browser chrome */}
       <div className="flex items-center gap-1.5 px-2 py-2 bg-white border-b border-gray-200 flex-shrink-0">
-        {/* Nav buttons */}
         <button
           className={`p-1.5 rounded-md transition-colors ${canBack ? 'hover:bg-gray-100 text-gray-600' : 'text-gray-300 cursor-not-allowed'}`}
           onClick={goBack} disabled={!canBack} title="Back"
@@ -196,8 +147,25 @@ export default function Browser({ nodeId }: Props) {
         </button>
 
         {/* Address bar */}
-        <div className="flex-1 flex items-center gap-1.5 bg-gray-100 border border-gray-200 rounded-full px-3 py-1 focus-within:border-blue-400 focus-within:bg-white transition-colors">
-          <Globe size={11} className="text-gray-400 flex-shrink-0" />
+        <div className="relative flex-1 flex items-center gap-1.5 bg-gray-100 border border-gray-200 rounded-full px-2.5 py-1 focus-within:border-blue-400 focus-within:bg-white transition-colors min-w-0">
+          {page && !editing ? (
+            page.secure ? (
+              <button
+                className="flex items-center gap-0.5 text-gray-700 hover:bg-gray-200 rounded-full px-1 flex-shrink-0"
+                onClick={() => setShowSecurity((v) => !v)}
+                title="View site information"
+                data-testid="secure-chip"
+              >
+                <Lock size={11} className="text-gray-700" />
+              </button>
+            ) : (
+              <span className="text-[11px] text-gray-500 font-medium flex-shrink-0 border-r border-gray-300 pr-1.5" data-testid="not-secure-chip">
+                Not secure
+              </span>
+            )
+          ) : (
+            <Globe size={11} className="text-gray-400 flex-shrink-0" />
+          )}
           <input
             ref={inputRef}
             className="flex-1 bg-transparent text-xs outline-none text-gray-700 min-w-0"
@@ -205,60 +173,79 @@ export default function Browser({ nodeId }: Props) {
             onChange={(e) => setAddressInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && navigate(addressInput)}
             onFocus={(e) => e.target.select()}
-            placeholder="Enter hostname or IP…"
+            placeholder="Enter a web address…"
             spellCheck={false}
+            data-testid="browser-address"
           />
           {addressInput && (
             <button className="text-gray-300 hover:text-gray-500" onClick={() => { setAddressInput(''); inputRef.current?.focus() }}>
               <X size={11} />
             </button>
           )}
+
+          {showSecurity && page?.secure && (
+            <div
+              className="absolute top-full left-0 mt-1.5 w-64 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-20 text-xs text-gray-700 leading-relaxed"
+              data-testid="security-popover"
+            >
+              <div className="flex items-center gap-1.5 font-semibold mb-1"><Lock size={12} /> Connection is encrypted (TLS 1.3)</div>
+              <p>
+                Certificate issued to <em>{page.host}</em> by {page.issuer ?? 'Networx Demo CA'}.
+                This means the connection to this server is private — it does not mean the site is trustworthy.
+              </p>
+            </div>
+          )}
         </div>
 
-        {/* Go button */}
         <button
-          className="px-2.5 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs font-medium rounded-full transition-colors flex-shrink-0"
+          className="px-2.5 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs font-medium rounded-full transition-colors flex-shrink-0 disabled:opacity-50"
           onClick={() => navigate(addressInput)}
+          disabled={!!loading}
         >
           Go
         </button>
       </div>
 
       {/* Page tab title strip */}
-      {page && (
+      {(page || loading) && (
         <div className="flex items-center gap-1.5 px-3 py-1 bg-gray-50 border-b border-gray-200 text-xs text-gray-500 flex-shrink-0">
-          <Globe size={11} className="text-blue-400" />
-          <span className="truncate">{page.title}</span>
+          <Globe size={11} className={loading ? 'text-gray-300 animate-spin' : 'text-blue-400'} />
+          <span className="truncate">{loading ? `Connecting to ${loading}…` : page?.title}</span>
         </div>
       )}
 
       {/* Page area */}
       <div className="flex-1 bg-white overflow-hidden">
-        {!page && !error && (
+        {!page && !error && !loading && (
           <div className="h-full flex items-center justify-center p-6">
             <div className="text-center text-gray-400 max-w-xs">
               <Globe size={36} className="mx-auto mb-3 text-gray-200" />
-              <p className="text-sm font-medium text-gray-500 mb-1">NetworX Browser</p>
+              <p className="text-sm font-medium text-gray-500 mb-1">Networx Browser</p>
               <p className="text-xs text-gray-400 leading-relaxed">
-                Type a hostname or IP address above to browse to a web server on your network.
+                Type a web address above. Try both <code className="font-mono">http://</code> and{' '}
+                <code className="font-mono">https://</code> with the packet capture open.
               </p>
               <div className="mt-3 text-xs text-gray-400 space-y-1">
-                <p>e.g. <code className="bg-gray-100 px-1.5 py-0.5 rounded font-mono">192.168.1.80</code></p>
-                <p>or &nbsp; <code className="bg-gray-100 px-1.5 py-0.5 rounded font-mono">www.school.local</code></p>
+                <p>e.g. <code className="bg-gray-100 px-1.5 py-0.5 rounded font-mono">http://www.careconnect.example</code></p>
+                <p>or &nbsp; <code className="bg-gray-100 px-1.5 py-0.5 rounded font-mono">192.168.1.80</code></p>
               </div>
             </div>
           </div>
         )}
 
-        {error && (
-          <div className="h-full flex items-center justify-center p-8">
+        {loading && !page && (
+          <div className="h-full flex items-center justify-center text-xs text-gray-400">Waiting for {loading}…</div>
+        )}
+
+        {error && !loading && (
+          <div className="h-full flex items-center justify-center p-8" data-testid="browser-error">
             <div className="text-center max-w-sm">
               <div className="text-4xl mb-4">🔌</div>
               <h2 className="text-base font-semibold text-gray-700 mb-3">This site can't be reached</h2>
-              <p className="text-xs text-gray-500 whitespace-pre-line leading-relaxed">{error}</p>
+              <p className="text-xs text-gray-500 whitespace-pre-line leading-relaxed">{error.message}</p>
               <button
                 className="mt-4 px-4 py-1.5 bg-blue-500 text-white text-xs rounded-full hover:bg-blue-600 transition-colors"
-                onClick={() => navigate(addressInput)}
+                onClick={() => navigate(error.url, false)}
               >
                 Reload
               </button>
