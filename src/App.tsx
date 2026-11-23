@@ -12,7 +12,7 @@ import '@xyflow/react/dist/style.css'
 import {
   BookOpen, Cable, Wifi, Trash2, HelpCircle,
   ChevronRight, ChevronLeft, Save, LayoutGrid, Check, X as XIcon,
-  Upload, Layers, Gauge,
+  Upload, Layers, Gauge, Radio,
 } from 'lucide-react'
 
 import { useNetworkStore } from './store'
@@ -23,6 +23,7 @@ import ConfigPanel from './components/ConfigPanel'
 import Terminal from './components/Terminal'
 import Browser from './components/Browser'
 import InfoPanel from './components/InfoPanel'
+import CaptureDrawer from './components/CaptureDrawer'
 import { PRESETS } from './simulation/presets'
 import type { DeviceType, NetNode, AnimSpeed } from './types'
 
@@ -310,6 +311,25 @@ function SpeedControl() {
   )
 }
 
+function CaptureToggle() {
+  const { captureOpen, setCaptureOpen, captures } = useNetworkStore()
+  return (
+    <button
+      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+        captureOpen ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-200' : 'text-gray-600 hover:bg-gray-50'
+      }`}
+      onClick={() => setCaptureOpen(!captureOpen)}
+      title="Packet capture: see every packet, its ports and whether it is readable"
+      data-testid="capture-toggle"
+    >
+      <Radio size={14} /> Capture
+      {!captureOpen && captures.length > 0 && (
+        <span className="text-[10px] bg-rose-100 text-rose-700 rounded-full px-1.5 leading-4 tabular-nums">{captures.length}</span>
+      )}
+    </button>
+  )
+}
+
 // ─── Toolbar ──────────────────────────────────────────────────────────────────
 
 interface ToolbarProps {
@@ -379,6 +399,7 @@ function Toolbar({ connectionType, setConnectionType, onDeleteSelected, onShowIn
         >
           <Layers size={14} /> Layers
         </button>
+        <CaptureToggle />
         <button
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
             infoOpen ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'
@@ -469,7 +490,7 @@ function AppInner() {
     addDevice, selectNode, deleteSelected,
     connectionType, setConnectionType,
     selectedNodeId, activePanel, setPanel,
-    showLayers, toggleLayers,
+    showLayers, toggleLayers, captureOpen,
   } = useNetworkStore()
 
   const [infoOpen, setInfoOpen] = useState(false)
@@ -518,7 +539,10 @@ function AppInner() {
             : <ChevronRight size={14} className="text-gray-500" />}
         </button>
 
-        <NetworkCanvas />
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          <NetworkCanvas />
+          {captureOpen && <CaptureDrawer />}
+        </div>
 
         {activePanel && <SidePanel />}
       </div>

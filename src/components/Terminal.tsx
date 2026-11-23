@@ -15,7 +15,7 @@ interface Props {
 }
 
 export default function Terminal({ nodeId, onClose }: Props) {
-  const { nodes, edges, appendTermLine, clearTerm, learnMac, learnArp, dispatchPackets, updateNodeData } = useNetworkStore()
+  const { nodes, edges, appendTermLine, clearTerm, learnMac, learnArp, dispatchPackets, updateNodeData, dispatchCaptures, recordConnection, recentConns } = useNetworkStore()
   const node = nodes.find((n) => n.id === nodeId)
   const [input, setInput] = useState('')
   const [histIdx, setHistIdx] = useState(-1)
@@ -77,6 +77,8 @@ export default function Terminal({ nodeId, onClose }: Props) {
     const result = runCommand(raw, {
       selfId: sshNodeId ?? nodeId,
       nodes, edges, learnMac, learnArp, dispatchPackets, updateNodeData,
+      dispatchCaptures, recordConnection,
+      recentConnections: recentConns[sshNodeId ?? nodeId] ?? [],
     })
 
     // Handle CLEAR signal
@@ -111,7 +113,7 @@ export default function Terminal({ nodeId, onClose }: Props) {
     setCmdHistory((h) => [raw, ...h].slice(0, 50))
     setHistIdx(-1)
     setInput('')
-  }, [input, pending, nodeId, nodes, edges, appendTermLine, clearTerm, learnMac, learnArp, dispatchPackets, updateNodeData, sshNodeId, sshNode])
+  }, [input, pending, nodeId, nodes, edges, appendTermLine, clearTerm, learnMac, learnArp, dispatchPackets, updateNodeData, dispatchCaptures, recordConnection, recentConns, sshNodeId, sshNode])
 
   function handleKeyDown(e: React.KeyboardEvent) {
     // control+C (the same key on macOS, not ⌘) stops a running command's output

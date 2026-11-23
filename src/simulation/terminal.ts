@@ -1,7 +1,7 @@
-import type { TerminalLine, PacketAnim } from '../types'
+import type { TerminalLine, PacketAnim, PendingCapture } from '../types'
 import { findPath, nodeById, nodeByIp, simulatePingRtt, subnetToCidr } from './network'
 import { type TermContext, type Lines, out, err, info, self, delayLines } from './context'
-import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter } from './packets'
+import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
 import { resolveTarget, isResolveError, isIp, dnsServerFor, type Resolution } from './resolve'
 import { tokenize } from './tokenize'
 import { dnsConversation, runConversations } from './exchange'
@@ -57,10 +57,30 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
     return [...lines, out(header, afterDns), err('Request timeout for icmp_seq 0', afterDns)]
   }
 
-  ctx.dispatchPackets?.(startAfter(makePacketsWithArp(src, dst, path, ctx, 'ICMP', 'ICMP', true), afterDns))
+  const icmpPackets = startAfter(makePacketsWithArp(src, dst, path, ctx, 'ICMP', 'ICMP', true), afterDns)
+  ctx.dispatchPackets?.(icmpPackets)
 
   const hops = path.length - 1
   const internet = dst.data.deviceType === 'cloud'
+
+  // Capture: four echo request/reply pairs; the first is the one animated
+  const roundTrip = 2 * hops * scaledHop(HOP_MS)
+  const echoStart = finishMs(icmpPackets) - roundTrip
+  const out1 = firstHopMacs(path, ctx.nodes)
+  const back1 = firstHopMacs([...path].reverse(), ctx.nodes)
+  const convId = `icmp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+  const icmpBase = { conversationId: convId, transport: 'ICMP' as const, app: 'ICMP' as const, encrypted: false, length: 84 }
+  const captures: PendingCapture[] = []
+  for (let i = 0; i < 4; i++) {
+    const t = echoStart + i * Math.max(roundTrip, 1)
+    captures.push(
+      { ...icmpBase, stepIndex: 2 * i, delayMs: t, srcIp: src.data.ip, dstIp: r.ip, ...out1,
+        info: `Echo (ping) request  id=0x0001, seq=${i}, ttl=64` },
+      { ...icmpBase, stepIndex: 2 * i + 1, delayMs: t + roundTrip / 2, srcIp: r.ip, dstIp: src.data.ip, ...back1,
+        info: `Echo (ping) reply    id=0x0001, seq=${i}, ttl=${internet ? 52 : 64 - hops}` },
+    )
+  }
+  ctx.dispatchCaptures?.(captures)
   const body: Lines = [out(header)]
   const rtts: number[] = []
   for (let i = 0; i < 4; i++) {
