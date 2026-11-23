@@ -79,9 +79,9 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
   for (let i = 0; i < 4; i++) {
     const t = echoStart + i * Math.max(roundTrip, 1)
     captures.push(
-      { ...icmpBase, stepIndex: 2 * i, delayMs: t, srcIp: src.data.ip, dstIp: r.ip, ...out1,
+      { ...icmpBase, stepIndex: 2 * i, delayMs: t, srcIp: src.data.ip, dstIp: r.ip, ...out1, route: path,
         info: `Echo (ping) request  id=0x0001, seq=${i}, ttl=64` },
-      { ...icmpBase, stepIndex: 2 * i + 1, delayMs: t + roundTrip / 2, srcIp: r.ip, dstIp: src.data.ip, ...back1,
+      { ...icmpBase, stepIndex: 2 * i + 1, delayMs: t + roundTrip / 2, srcIp: r.ip, dstIp: src.data.ip, ...back1, route: [...path].reverse(),
         info: `Echo (ping) reply    id=0x0001, seq=${i}, ttl=${internet ? 52 : 64 - hops}` },
     )
   }
@@ -413,6 +413,7 @@ function dhcpCaptures(
     ...base,
     delayMs: i * legMs,
     stepIndex: i,
+    route: c2s ? path : [...path].reverse(),
     srcIp: c2s ? '0.0.0.0' : router.data.ip,
     srcPort: c2s ? DHCP_CLIENT_PORT : DHCP_SERVER_PORT,
     dstIp: c2s ? '255.255.255.255' : offered,

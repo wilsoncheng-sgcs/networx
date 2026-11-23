@@ -334,14 +334,15 @@ export function playConversation(
   const captures: PendingCapture[] = [...arp.captures]
   const lines: TerminalLine[] = []
   const c2sMacs = firstHopMacs(path, ctx.nodes)
-  const s2cMacs = firstHopMacs([...path].reverse(), ctx.nodes)
+  const reversed = [...path].reverse()
+  const s2cMacs = firstHopMacs(reversed, ctx.nodes)
   const clientIp = client?.data.ip ?? ''
 
   let t = arp.endMs
   conv.steps.forEach((step, i) => {
     const back = step.dir === 's2c'
     packets.push(...leg(path, ctx.edges, animProtocol(step), step.label, t, back, hop))
-    captures.push(captureFor(conv, step, i, t, clientIp, back ? s2cMacs : c2sMacs))
+    captures.push({ ...captureFor(conv, step, i, t, clientIp, back ? s2cMacs : c2sMacs), route: back ? reversed : path })
     const end = t + legMs
     for (const line of step.lines ?? []) lines.push({ ...line, delayMs: end + (line.delayMs ?? 0) })
     t = end

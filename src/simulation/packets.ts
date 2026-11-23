@@ -212,11 +212,11 @@ export function arpBefore(
   const convId = `arp-${nextBatchId()}`
   const base = { conversationId: convId, transport: 'ARP' as const, app: 'ARP' as const, encrypted: false, length: 28 }
   const captures: PendingCapture[] = [
-    { ...base, stepIndex: 0, delayMs: startMs,
+    { ...base, stepIndex: 0, delayMs: startMs, route: arpPath,
       srcIp: src.data.ip, dstIp: arpTarget.data.ip,
       srcMac: src.data.mac, dstMac: 'ff:ff:ff:ff:ff:ff',
       info: `Who has ${arpTarget.data.ip}? Tell ${src.data.ip}` },
-    { ...base, stepIndex: 1, delayMs: startMs + legMs,
+    { ...base, stepIndex: 1, delayMs: startMs + legMs, route: [...arpPath].reverse(),
       srcIp: arpTarget.data.ip, dstIp: src.data.ip,
       srcMac: arpTarget.data.mac, dstMac: src.data.mac,
       info: `${arpTarget.data.ip} is at ${arpTarget.data.mac}` },

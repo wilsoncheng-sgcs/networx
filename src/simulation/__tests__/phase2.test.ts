@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { CertificateState } from '../../types'
 import { certificateFor, certProblem, formatCertDate, WRONG_CERT_NAME } from '../exchange'
 import { parseCurlFlags } from '../protocols/web'
+import { tapView, tapLabel } from '../tap'
 import { run, tcpRecords, careConnect } from './helpers'
 
 const HOST = 'www.careconnect.example'
@@ -240,5 +241,46 @@ describe('ssh capture records', () => {
     const { captures, text } = run('reception', 'ssh 203.0.113.21', net)
     expect(tcpRecords(captures).map((c) => c.tcpFlags)).toEqual(['SYN', 'RST, ACK'])
     expect(text).toContain('ssh: connect to host 203.0.113.21 port 22: Connection refused')
+  })
+})
+
+describe('tap a link', () => {
+  const macOf = (net: ReturnType<typeof careConnect>, id: string) => net.nodes.find((n) => n.id === id)!.data.mac
+  const edgeBetween = (net: ReturnType<typeof careConnect>, a: string, b: string) =>
+    net.edges.find((e) => (e.source === a && e.target === b) || (e.source === b && e.target === a))!
+
+  it('keeps only packets that cross the tapped link; IPs stay, MACs are that link\'s', () => {
+    const net = careConnect()
+    const { captures } = run('patient', 'curl http://www.careconnect.example', net)
+    const get = captures.find((c) => c.payload?.startsWith('GET'))!
+
+    // Patient's Wi-Fi link: laptop → home gateway
+    const wifi = tapView(get, edgeBetween(net, 'patient', 'homegw'), net.nodes)!
+    expect(wifi).toMatchObject({ srcMac: macOf(net, 'patient'), dstMac: macOf(net, 'homegw'), srcIp: get.srcIp, dstIp: get.dstIp })
+
+    // Server LAN, past the switch: the router addressed the frame to the web server
+    const lan = tapView(get, edgeBetween(net, 'ccsw', 'ccweb'), net.nodes)!
+    expect(lan).toMatchObject({ srcMac: macOf(net, 'ccrouter'), dstMac: macOf(net, 'ccweb'), srcIp: get.srcIp, dstIp: get.dstIp })
+
+    // The reply crosses the same link the other way
+    const reply = captures.find((c) => c.payload?.startsWith('HTTP/1.1 200'))!
+    expect(tapView(reply, edgeBetween(net, 'ccsw', 'ccweb'), net.nodes)).toMatchObject({ srcMac: macOf(net, 'ccweb'), dstMac: macOf(net, 'ccrouter') })
+
+    // The clinic's links never see the patient's traffic
+    expect(tapView(get, edgeBetween(net, 'clinicgw', 'reception'), net.nodes)).toBeNull()
+  })
+
+  it('DNS crosses the DNS server\'s link, not the web server\'s', () => {
+    const net = careConnect()
+    const { captures } = run('patient', 'nslookup www.careconnect.example', net)
+    const query = captures.find((c) => c.app === 'DNS')!
+    expect(tapView(query, edgeBetween(net, 'ccsw', 'ccdns'), net.nodes)).not.toBeNull()
+    expect(tapView(query, edgeBetween(net, 'ccsw', 'ccweb'), net.nodes)).toBeNull()
+  })
+
+  it('names the link for the drawer note', () => {
+    const net = careConnect()
+    expect(tapLabel(edgeBetween(net, 'patient', 'homegw'), net.nodes)).toBe("Patient's Laptop ⇄ Home Gateway (Wi-Fi)")
+    expect(tapLabel(edgeBetween(net, 'ccsw', 'ccweb'), net.nodes)).toMatch(/\(wired\)$/)
   })
 })

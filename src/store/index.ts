@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { addEdge, applyNodeChanges, applyEdgeChanges } from '@xyflow/react'
 import type { NodeChange, EdgeChange, Connection } from '@xyflow/react'
 import type { NetNode, NetEdge, NodeData, PanelType, RouteEntry, MacEntry, ArpEntry, FirewallRule, DnsRecord, TerminalLine, PacketAnim, AnimSpeed, CaptureRecord, PendingCapture, ConnRecord } from '../types'
+import { tapView } from '../simulation/tap'
 import { setAnimSpeed } from '../simulation/packets'
 import { makeDefaultData, normaliseNode } from '../simulation/defaults'
 import type { Preset } from '../simulation/presets'
@@ -101,6 +102,9 @@ interface NetworkStore {
   clearCaptures: () => void
   addCapture: (record: Omit<CaptureRecord, 'no' | 'timeMs'>) => void
   dispatchCaptures: (records: PendingCapture[]) => void
+  /** Tap a link: record only packets crossing this edge (null = every packet). */
+  tapEdgeId: string | null
+  setTap: (edgeId: string | null) => void
 
   // Recent TCP connections per node, newest first (not persisted; for netstat)
   recentConns: Record<string, ConnRecord[]>
@@ -131,6 +135,7 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
   captures: [],
   captureOpen: false,
   captureStartMs: Date.now(),
+  tapEdgeId: null,
   recentConns: {},
   layoutVersion: 0,
 
@@ -138,7 +143,12 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
     set((s) => ({ nodes: applyNodeChanges(changes, s.nodes) })),
 
   onEdgesChange: (changes) =>
-    set((s) => ({ edges: applyEdgeChanges(changes, s.edges) })),
+    set((s) => {
+      const edges = applyEdgeChanges(changes, s.edges)
+      // Deleting the tapped link ends the tap
+      const tapEdgeId = s.tapEdgeId && edges.some((e) => e.id === s.tapEdgeId) ? s.tapEdgeId : null
+      return { edges, tapEdgeId }
+    }),
 
   onConnect: (connection) => {
     const ctype = get().connectionType
@@ -323,11 +333,22 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
     }),
 
   dispatchCaptures: (records) => {
+    // A tapped link sees only the packets that cross it, with that link's MAC addresses
+    const { tapEdgeId, edges, nodes } = get()
+    const tap = tapEdgeId ? edges.find((e) => e.id === tapEdgeId) : undefined
+    const visible = tap
+      ? records.flatMap((r) => {
+          const seen = tapView(r, tap, nodes)
+          return seen ? [{ ...seen, tapped: true }] : []
+        })
+      : records
     // Each record appears when its packet leaves, so the list grows in time with the animation
-    records.forEach(({ delayMs, ...record }) => {
+    visible.forEach(({ delayMs, ...record }) => {
       setTimeout(() => get().addCapture(record), delayMs)
     })
   },
+
+  setTap: (edgeId) => set({ tapEdgeId: edgeId, ...(edgeId ? { captureOpen: true } : {}) }),
 
   recordConnection: (nodeId, conn) =>
     set((s) => ({
@@ -352,11 +373,12 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
       recentConns: {},
       selectedNodeId: null,
       activePanel: null,
+      tapEdgeId: null,
     })
   },
 
   clearCanvas: () => {
-    set({ nodes: [], edges: [], selectedNodeId: null, activePanel: null })
+    set({ nodes: [], edges: [], selectedNodeId: null, activePanel: null, tapEdgeId: null })
     localStorage.removeItem(STORAGE_KEY)
   },
 }))
