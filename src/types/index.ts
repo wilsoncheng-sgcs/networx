@@ -84,6 +84,8 @@ export interface NodeData extends Record<string, unknown> {
   gateway: string
   mac: string
   isOn: boolean
+  /** Host: address set by hand ('manual', the default) or obtained by DHCP. */
+  ipMode?: 'manual' | 'dhcp'
   // Router
   routingTable: RouteEntry[]
   // Router DHCP server

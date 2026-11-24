@@ -69,6 +69,21 @@ export function subnetToCidr(subnet: string): number {
     .reduce((acc, octet) => acc + octet.toString(2).split('').filter((b) => b === '1').length, 0)
 }
 
+/** An IPv4 address as a 32-bit number, and back. */
+export function ipToInt(ip: string): number {
+  return ip.split('.').map(Number).reduce((acc, o) => ((acc << 8) | (o & 255)) >>> 0, 0)
+}
+export function intToIp(n: number): string {
+  return [24, 16, 8, 0].map((s) => (n >>> s) & 255).join('.')
+}
+
+/** The network and broadcast addresses of `ip` with `subnet`. */
+export function networkRange(ip: string, subnet: string): { network: string; broadcast: string } {
+  const m = ipToInt(subnet)
+  const net = (ipToInt(ip) & m) >>> 0
+  return { network: intToIp(net), broadcast: intToIp((net | (~m >>> 0)) >>> 0) }
+}
+
 /** Check if two IPs are on the same subnet */
 export function sameSubnet(ip1: string, ip2: string, subnet: string): boolean {
   const mask = subnet.split('.').map(Number)

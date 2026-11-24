@@ -994,6 +994,40 @@ await scenario(31, 'Phase 3 — firewall rules', async () => {
   await loadCareConnect()
 })
 
+await scenario(32, 'Configure: Manual or Automatic (DHCP) address', async () => {
+  await loadCareConnect()
+  if (!(await page.getByTestId('capture-drawer').isVisible().catch(() => false))) await page.getByTestId('capture-toggle').click()
+  await clearCapture()
+  // The Patient's Laptop is on the home gateway, which runs a DHCP server
+  await selectNode("Patient's Laptop")
+  await openTab('Configure')
+  const ip = aside().getByTestId('ip-address')
+  check('starts as Manual, address editable',
+    (await aside().getByTestId('ip-mode-manual').getAttribute('aria-pressed')) === 'true' && (await ip.getAttribute('readonly')) === null)
+  await aside().getByTestId('ip-mode-dhcp').click()
+  await page.waitForFunction(() => document.querySelector('[data-testid=dhcp-status]')?.textContent?.startsWith('Leased'), null, { timeout: 30000 })
+  const status = await aside().getByTestId('dhcp-status').innerText()
+  check('lease from the Home Gateway', /Leased 192\.168\.1\.\d+ from Home Gateway \(192\.168\.1\.1\)/.test(status), status)
+  check('address fields become read-only', (await ip.getAttribute('readonly')) !== null)
+  check('gateway and mask come from the gateway',
+    (await aside().getByTestId('default-gateway').inputValue()) === '192.168.1.1' && (await aside().getByTestId('subnet-mask').inputValue()) === '255.255.255.0')
+  await page.waitForTimeout(300)
+  const dhcp = (await rowTexts()).map(cols).filter((r) => r.proto === 'DHCP')
+  check('Discover, Offer, Request, ACK in the capture', dhcp.length === 4, `${dhcp.length} DHCP rows`)
+  await shot('32-dhcp-configure')
+  await aside().getByTestId('ip-mode-manual').click()
+  check('Manual again: editable, address kept', (await ip.getAttribute('readonly')) === null && (await ip.inputValue()).startsWith('192.168.1.'))
+  // Reception PC: the clinic gateway's DHCP server is switched off
+  await selectNode('Reception PC')
+  await openTab('Configure')
+  await aside().getByTestId('ip-mode-dhcp').click()
+  const err = await aside().getByTestId('dhcp-status').innerText()
+  check('no DHCP server: says so, and the PC is left without an address',
+    err.includes('No DHCP server found') && (await aside().getByTestId('ip-address').inputValue()) === '', err)
+  await shot('32-dhcp-no-server')
+  await loadCareConnect()
+})
+
 await scenario(13, 'Layout at 1280×800 and 1440×900', async () => {
   if (!(await page.getByTestId('capture-drawer').isVisible().catch(() => false))) await page.getByTestId('capture-toggle').click()
   for (const [w, h] of [[1280, 800], [1440, 900]]) {

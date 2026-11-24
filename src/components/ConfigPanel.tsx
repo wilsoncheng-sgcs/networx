@@ -6,6 +6,8 @@ import { DEFAULT_ACCOUNT, defaultMailboxes } from '../simulation/defaults'
 import { PRESETS } from '../simulation/presets'
 import { servicesFor, isListening } from '../simulation/services'
 import { RECORD_TYPES, RECORD_HELP, DEFAULT_TTL, validateRecord, rdata } from '../simulation/dns'
+import { dhcpRequest } from '../simulation/terminal'
+import * as clock from '../simulation/clock'
 
 
 /** A copy of `list` with the item at `from` moved to `to`. */
@@ -21,22 +23,100 @@ interface Props {
   onClose: () => void
 }
 
-function Field({ label, value, onChange, placeholder = '', mono = false }: {
+function Field({ label, value, onChange, placeholder = '', mono = false, readOnly = false, testId }: {
   label: string
   value: string
   onChange: (v: string) => void
   placeholder?: string
   mono?: boolean
+  /** Shown but not editable (an address obtained by DHCP). */
+  readOnly?: boolean
+  testId?: string
 }) {
   return (
     <div className="flex flex-col gap-1">
       <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{label}</label>
       <input
-        className={`border border-gray-200 rounded-md px-2.5 py-1.5 text-sm outline-none focus:ring-2 focus:ring-blue-300 ${mono ? 'font-mono' : ''}`}
+        className={`border border-gray-200 rounded-md px-2.5 py-1.5 text-sm outline-none ${readOnly ? 'bg-gray-50 text-gray-500 cursor-default' : 'focus:ring-2 focus:ring-blue-300'} ${mono ? 'font-mono' : ''}`}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
+        placeholder={readOnly ? '' : placeholder}
+        readOnly={readOnly}
+        title={readOnly ? 'Obtained by DHCP. Choose Manual to type an address.' : undefined}
+        data-testid={testId}
       />
+    </div>
+  )
+}
+
+/**
+ * How a host gets its address: typed in by hand, or obtained by DHCP. Choosing DHCP (or Renew) runs the
+ * same Discover → Offer → Request → ACK exchange as dhclient, animated, with its capture records.
+ */
+function IpAssignment({ node }: { node: NetNode }) {
+  const { nodes, edges, updateNodeData, dispatchPackets, dispatchCaptures } = useNetworkStore()
+  const [status, setStatus] = useState<{ kind: 'busy' | 'ok' | 'error'; text: string } | null>(null)
+  const mode = node.data.ipMode ?? 'manual'
+
+  const request = (fromManual: boolean) => {
+    const r = dhcpRequest({
+      selfId: node.id, nodes, edges, dispatchPackets, dispatchCaptures, updateNodeData,
+      schedule: (ms, fn) => { clock.after(ms, fn) },
+    })
+    if (!r.ok) {
+      // No lease: a device that was set by hand is left without an address (a renewal keeps its old one)
+      updateNodeData(node.id, fromManual ? { ipMode: 'dhcp', ip: '', gateway: '' } : { ipMode: 'dhcp' })
+      setStatus({ kind: 'error', text: (r.lines[0]?.text ?? '').replace(/^dhclient: /, '') })
+      return
+    }
+    updateNodeData(node.id, { ipMode: 'dhcp' })
+    setStatus({ kind: 'busy', text: 'Asking for an address: Discover → Offer → Request → ACK…' })
+    const server = r.server!
+    clock.after(r.ackMs, () => setStatus({ kind: 'ok', text: `Leased ${r.ip} from ${server.data.label} (${server.data.ip}).` }))
+  }
+
+  const choose = (m: 'manual' | 'dhcp') => {
+    if (m === mode) return
+    if (m === 'manual') { updateNodeData(node.id, { ipMode: 'manual' }); setStatus(null) }
+    else request(true)
+  }
+
+  const btn = (m: 'manual' | 'dhcp', label: string) => (
+    <button
+      data-testid={`ip-mode-${m}`}
+      aria-pressed={mode === m}
+      onClick={() => choose(m)}
+      className={`flex-1 px-2 py-1 text-xs font-medium rounded transition-colors ${mode === m ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+    >
+      {label}
+    </button>
+  )
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">IP Assignment</label>
+      <div className="flex gap-1 bg-gray-100 rounded-md p-0.5">
+        {btn('manual', 'Manual (static)')}
+        {btn('dhcp', 'Automatic (DHCP)')}
+      </div>
+      {mode === 'dhcp' && (
+        <div className="flex items-start gap-2">
+          <p
+            data-testid="dhcp-status"
+            className={`flex-1 text-xs ${status?.kind === 'error' ? 'text-red-600' : status?.kind === 'ok' ? 'text-green-700' : 'text-gray-400'}`}
+          >
+            {status?.text ?? 'Address, mask, gateway and DNS server come from the DHCP server. You can still type a different DNS server.'}
+          </p>
+          <button
+            data-testid="dhcp-renew"
+            onClick={() => request(false)}
+            disabled={status?.kind === 'busy'}
+            className="flex items-center gap-1 text-xs bg-blue-50 text-blue-600 hover:bg-blue-100 disabled:opacity-50 px-2 py-1 rounded transition-colors"
+          >
+            <RotateCcw size={11} /> Renew
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -80,6 +160,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
   const hasServices = ['web', 'dns', 'mail', 'file', 'server'].includes(data.deviceType)
   const hasIp = !(isSwitch || isHub)
   const isHost = ['pc', 'laptop', 'server', 'dns', 'web', 'mail', 'file'].includes(data.deviceType)
+  const byDhcp = isHost && data.ipMode === 'dhcp'
 
   const TABS = [
     { id: 'basic',    label: 'Basic' },
@@ -147,9 +228,10 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
                 {(isRouter || isGateway) && (
                   <Field label="WAN IP — eth0 (ISP-facing)" value={(data.wanIp as string) ?? ''} onChange={(v) => upd({ wanIp: v })} placeholder="e.g. 82.1.2.3" mono />
                 )}
-                <Field label={(isRouter || isGateway) ? 'LAN IP — eth1 (network-facing)' : 'IP Address'} value={data.ip} onChange={(v) => upd({ ip: v })} placeholder="192.168.1.x" mono />
-                <Field label="Subnet Mask" value={data.subnet} onChange={(v) => upd({ subnet: v })} placeholder="255.255.255.0" mono />
-                <Field label="Default Gateway" value={data.gateway} onChange={(v) => upd({ gateway: v })} placeholder="192.168.1.1" mono />
+                {isHost && <IpAssignment key={nodeId} node={node} />}
+                <Field label={(isRouter || isGateway) ? 'LAN IP — eth1 (network-facing)' : 'IP Address'} value={data.ip} onChange={(v) => upd({ ip: v })} placeholder="192.168.1.x" mono readOnly={byDhcp} testId="ip-address" />
+                <Field label="Subnet Mask" value={data.subnet} onChange={(v) => upd({ subnet: v })} placeholder="255.255.255.0" mono readOnly={byDhcp} testId="subnet-mask" />
+                <Field label="Default Gateway" value={data.gateway} onChange={(v) => upd({ gateway: v })} placeholder="192.168.1.1" mono readOnly={byDhcp} testId="default-gateway" />
                 {isHost && (
                   <>
                     <Field label="DNS Server" value={data.dnsServer ?? ''} onChange={(v) => upd({ dnsServer: v.trim() })} placeholder="e.g. 8.8.8.8" mono />
