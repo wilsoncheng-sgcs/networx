@@ -106,7 +106,7 @@ export function dnsSteps(id: string, name: string, qtype: DnsRecordType, answer:
   return [
     { dir: 'c2s', transport: 'UDP', app: 'DNS', label: 'DNS query',
       info: queryInfo(id, qtype, name),
-      payload: `Query: ${normName(name)}, type ${qtype}, class IN` },
+      payload: `Query: ${normName(name) || '<Root>'}, type ${qtype}, class IN` },
     { dir: 's2c', transport: 'UDP', app: 'DNS', label,
       info: responseInfo(id, qtype, name, answer),
       payload: responsePayload(qtype, name, answer) },

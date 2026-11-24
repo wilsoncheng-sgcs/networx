@@ -1,8 +1,10 @@
 import type { DnsRecordType, TerminalLine } from '../../types'
 import { type TermContext, type Lines, out, err, info, delayLines } from '../context'
-import { lookupName, isIp, resolveTarget, isResolveError, dnsServerIpOf, type DnsLookup } from '../resolve'
+import { lookupName, isIp, resolveTarget, isResolveError, dnsServerIpOf, routeTo, serverAnswer, PUBLIC_IPS, type DnsLookup } from '../resolve'
 import { playLookup } from '../lookup'
-import { RECORD_TYPES, digLine, fqdn, rdata, messageSize, normName, type DnsAnswer, type AnswerRecord } from '../dns'
+import { newConversation, runConversations, dnsSteps, type Leg } from '../exchange'
+import { RECORD_TYPES, digLine, fqdn, rdata, messageSize, normName, newTransactionId, type DnsAnswer, type AnswerRecord } from '../dns'
+import type { NetNode } from '../../types'
 import { nodeById } from '../network'
 import { cacheEntries, flushDnsCache } from '../dnsCache'
 
@@ -78,7 +80,6 @@ export function cmdDig(args: string[], ctx: TermContext): Lines {
   const at = args.find((a) => a.startsWith('@'))
   const rest = args.filter((a) => !a.startsWith('+') && !a.startsWith('@'))
   const short = flags.includes('+short')
-  if (flags.includes('+trace')) return []   // B5
   let qtype: DnsRecordType = 'A'
   let name = ''
   for (const a of rest) {
@@ -96,6 +97,7 @@ export function cmdDig(args: string[], ctx: TermContext): Lines {
     serverIp = s.ip
   }
   const banner = [out(`; <<>> DiG 9.10.6 <<>> ${args.join(' ')}`), out(';; global options: +cmd')]
+  if (flags.includes('+trace')) return digTrace(name, qtype, ctx, banner)
   const looked = lookupName(name, qtype, ctx, { serverIp })
   if (looked.kind === 'cached') return digAnswer(name, qtype, looked, { short, banner, ctx })
   if (looked.kind !== 'answer') {
@@ -206,4 +208,121 @@ export function cmdFlushDns(ctx: TermContext, quiet = false): Lines {
   if (quiet) return []
   const me = nodeById(ctx.selfId, ctx.nodes)
   return [info(`Flushed the DNS cache on ${me?.data.label ?? 'this device'}. The next lookup asks the DNS server again.`)]
+}
+
+// ── dig +trace (Phase 4 B5) ──────────────────────────────────────────────────
+
+/** The 13 root server names (a to m). Only a.root-servers.net's address is shown (198.41.0.4, its real one). */
+const ROOT_SERVERS = 'abcdefghijklm'.split('').map((l) => `${l}.root-servers.net`)
+const ROOT_A_IP = '198.41.0.4'
+const ROOT_NS_TTL = 518400
+const TLD_NS_TTL = 172800
+/** Simulated top-level-domain servers: made-up names on TEST-NET-1 (192.0.2.0/24, RFC 5737). */
+const TLD_IPS: Record<string, string> = { example: '192.0.2.10', com: '192.0.2.11', org: '192.0.2.12', uk: '192.0.2.13', au: '192.0.2.14' }
+const tldServer = (tld: string) => ({ name: tld === 'example' ? 'a.tld-servers.example' : `a.${tld}-servers.example`, ip: TLD_IPS[tld] ?? '192.0.2.15' })
+
+/** The DNS server node that holds `name`'s zone, and the zone's apex and name server. */
+function authorityFor(name: string, ctx: TermContext): { node: NetNode; zone: string; ns: string; nsTtl: number } | null {
+  const n = normName(name)
+  let best: { node: NetNode; zone: string; ns: string; nsTtl: number } | null = null
+  for (const node of ctx.nodes.filter((x) => x.data.deviceType === 'dns' && x.data.ip)) {
+    const records = node.data.dnsRecords ?? []
+    for (const r of records.filter((x) => x.type === 'NS')) {
+      const zone = normName(r.name)
+      if ((n === zone || n.endsWith(`.${zone}`)) && (!best || zone.length > best.zone.length)) best = { node, zone, ns: normName(r.value), nsTtl: r.ttl }
+    }
+  }
+  if (best) return best
+  // No NS record: the zone is the last two labels, if a DNS server holds records under it
+  const zone = n.split('.').slice(-2).join('.')
+  const node = ctx.nodes.find((x) => x.data.deviceType === 'dns' && x.data.ip && (x.data.dnsRecords ?? []).some((r) => normName(r.name) === zone || normName(r.name).endsWith(`.${zone}`)))
+  return node ? { node, zone, ns: `ns.${zone}`, nsTtl: 3600 } : null
+}
+
+const nsRecord = (name: string, value: string, ttl: number): AnswerRecord => ({ name, type: 'NS', value, ttl })
+
+function digTrace(name: string, qtype: DnsRecordType, ctx: TermContext, banner: Lines): Lines {
+  const n = normName(name)
+  const tld = n.split('.').pop() ?? ''
+  const fail = (explain: string): Lines => [err(';; connection timed out; no servers could be reached'), info(explain)]
+
+  // 1. The root servers' names, from this device's resolver
+  const root = lookupName('.', 'NS', ctx, { useCache: false })
+  if (root.kind === 'no-dns') return [...banner, ...fail(root.explain)]
+  if (root.kind === 'timeout') return [...banner, ...playLookup({ name: '.', timeout: root.timeout }, ctx, fail(root.explain)).lines]
+  if (root.kind !== 'answer') return banner
+  const rootNs: AnswerRecord[] = ROOT_SERVERS.map((s) => nsRecord('', s, ROOT_NS_TTL))
+  const resolverIp = root.query.serverIp
+
+  const legs: Leg[] = []
+  const step = (server: NetNode, serverIp: string, path: string[], qname: string, qt: DnsRecordType, answer: DnsAnswer, lines: Lines) => {
+    const steps = dnsSteps(newTransactionId(), qname, qt, answer)
+    steps[1]!.lines = lines
+    legs.push({ conv: newConversation(ctx.selfId, server.id, serverIp, 53, steps), path })
+  }
+  const received = (records: AnswerRecord[], qname: string, ip: string, label: string, ms: number) =>
+    out(`;; Received ${messageSize(qname, records)} bytes from ${ip}#53(${label}) in ${ms} ms`)
+  const block = (records: AnswerRecord[], tail: TerminalLine): Lines => [...records.map((r) => out(digLine(r))), tail, out('')]
+
+  step(root.query.server, resolverIp, root.query.path, '.', 'NS', { status: 'NOERROR', records: rootNs, authoritative: false },
+    [...banner, ...block(rootNs, received(rootNs, '.', resolverIp, resolverIp, queryTimeMs(root.query.path, ctx)))])
+
+  // 2–3. The root and the top-level-domain servers are on the internet
+  const cloud = ctx.nodes.find((x) => x.data.deviceType === 'cloud' && x.data.isOn !== false)
+  const toInternet = cloud ? routeTo(cloud, ROOT_A_IP, ctx, { protocol: 'UDP', port: 53 }) : null
+  const auth = authorityFor(n, ctx)
+  const isPublic = !auth && !!PUBLIC_IPS[n]
+  const simulated = tld === 'example'
+    ? 'ⓘ Networx pretends .example is a real top-level domain so you can see every step. A real domain such as nsw.gov.au goes root → .au → gov.au → nsw.gov.au.'
+    : `ⓘ The .${tld} step is simulated, with a made-up server name (${tldServer(tld).name}). A real domain such as nsw.gov.au goes root → .au → gov.au → nsw.gov.au.`
+  const resolverNote = 'ⓘ dig +trace makes each query itself so you can see every step. Normally your device asks one server (its resolver), which does these steps for you and caches each answer.'
+  if (!cloud || !toInternet || !toInternet.ok) {
+    const why = toInternet && !toInternet.ok ? toInternet.explain : 'ⓘ This device has no route to the internet, where the root servers are.'
+    const run1 = runConversations(legs, ctx)
+    return [...run1.lines, ...delayLines(fail(why), run1.endMs)]
+  }
+  const net = toInternet.path
+  const rand = (base: number) => base + Math.floor(Math.random() * 6)
+
+  if (!auth && !isPublic) {
+    // The root has no such top-level domain (or the zone is only on this network): no such name
+    const nx: DnsAnswer = { status: 'NXDOMAIN', records: [], authoritative: true }
+    step(cloud, ROOT_A_IP, net, n, qtype, nx, [received([], n, ROOT_A_IP, ROOT_SERVERS[0]!, rand(18)), out(''),
+      info(`ⓘ NXDOMAIN from the root: no top-level domain or zone on the internet holds ${n}. (A name that only exists inside a network, like .local, can't be traced from the root.)`), info(resolverNote)])
+    return runConversations(legs, ctx).lines
+  }
+
+  const tldSrv = tldServer(tld)
+  const tldNs = [nsRecord(tld, tldSrv.name, TLD_NS_TTL)]
+  step(cloud, ROOT_A_IP, net, n, qtype, { status: 'NOERROR', records: tldNs, authoritative: false },
+    block(tldNs, received(tldNs, n, ROOT_A_IP, ROOT_SERVERS[0]!, rand(18))))
+
+  if (isPublic) {
+    // A well-known internet name: the (simulated) top-level-domain server gives the answer
+    const answer = serverAnswer(cloud, n, qtype, ctx)
+    step(cloud, tldSrv.ip, net, n, qtype, { ...answer, authoritative: true },
+      [...block(answer.records, received(answer.records, n, tldSrv.ip, tldSrv.name, rand(15))), info(simulated), info(resolverNote)])
+    return runConversations(legs, ctx).lines
+  }
+
+  // 3. The TLD server refers to the domain's name server
+  const domainNs = [nsRecord(auth!.zone, auth!.ns, auth!.nsTtl)]
+  step(cloud, tldSrv.ip, net, n, qtype, { status: 'NOERROR', records: domainNs, authoritative: false },
+    block(domainNs, received(domainNs, n, tldSrv.ip, tldSrv.name, rand(15))))
+
+  // 4. The domain's own DNS server answers (authoritative)
+  const authIp = auth!.node.data.ip
+  const toAuth = routeTo(auth!.node, authIp, ctx, { protocol: 'UDP', port: 53 })
+  if (!toAuth.ok || auth!.node.data.isOn === false) {
+    const run1 = runConversations(legs, ctx)
+    const why = !toAuth.ok ? toAuth.explain : `ⓘ ${auth!.node.data.label} (${authIp}) didn't answer.`
+    return [...run1.lines, ...delayLines(fail(why), run1.endMs)]
+  }
+  const answer = serverAnswer(auth!.node, n, qtype, ctx)
+  const tail = answer.status === 'NXDOMAIN'
+    ? [info(`ⓘ NXDOMAIN: ${auth!.ns} holds ${auth!.zone}'s records and has none for ${n}.`)]
+    : []
+  step(auth!.node, authIp, toAuth.path, n, qtype, answer,
+    [...block(answer.records, received(answer.records, n, authIp, auth!.ns, queryTimeMs(toAuth.path, ctx))), ...tail, info(simulated), info(resolverNote)])
+  return runConversations(legs, ctx).lines
 }

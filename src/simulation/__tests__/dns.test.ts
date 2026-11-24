@@ -167,3 +167,48 @@ describe('B3 — dig and nslookup -type', () => {
     expect(run('patient', 'nslookup -type=mx files.careconnect.example').text).toContain("*** Can't find files.careconnect.example: No answer")
   })
 })
+
+describe('B5 — dig +trace', () => {
+  it('root → example. → careconnect.example. NS → the answer, with the simulated-TLD note', () => {
+    const { text } = run('patient', 'dig +trace www.careconnect.example')
+    for (const l of 'abcdefghijklm') expect(text).toContain(`518400\tIN\tNS\t${l}.root-servers.net.`)
+    expect(text).toContain(';; Received 239 bytes from 203.0.113.53#53(203.0.113.53)')
+    expect(text).toMatch(/example\.\s+172800\tIN\tNS\ta\.tld-servers\.example\./)
+    expect(text).toMatch(/;; Received \d+ bytes from 198\.41\.0\.4#53\(a\.root-servers\.net\)/)
+    expect(text).toMatch(/careconnect\.example\.\s+3600\tIN\tNS\tns1\.careconnect\.example\./)
+    expect(text).toMatch(/;; Received \d+ bytes from 192\.0\.2\.10#53\(a\.tld-servers\.example\)/)
+    expect(text).toMatch(/careconnect\.example\.\s+3600\tIN\tA\t203\.0\.113\.80/)
+    expect(text).toMatch(/;; Received \d+ bytes from 203\.0\.113\.53#53\(ns1\.careconnect\.example\)/)
+    expect(text).toContain('ⓘ Networx pretends .example is a real top-level domain so you can see every step. A real domain such as nsw.gov.au goes root → .au → gov.au → nsw.gov.au.')
+    expect(text.indexOf('root-servers')).toBeLessThan(text.indexOf('tld-servers'))
+    expect(text.indexOf('tld-servers')).toBeLessThan(text.indexOf('ns1.careconnect'))
+  })
+
+  it('animates each query: to the resolver, to the Internet node twice, then to the domain\'s DNS server', () => {
+    const { captures } = run('patient', 'dig +trace www.careconnect.example')
+    const queries = captures.filter((c) => c.app === 'DNS' && c.dstPort === 53)
+    expect(queries.map((c) => c.dstIp)).toEqual(['203.0.113.53', '198.41.0.4', '192.0.2.10', '203.0.113.53'])
+    expect(queries.map((c) => c.route?.slice(-1)[0])).toEqual(['ccdns', 'net', 'net', 'ccdns'])
+    expect(captures.filter((c) => c.app === 'DNS' && c.srcPort === 53)).toHaveLength(4)
+  })
+
+  it('a public name: root → the real TLD (simulated server) → the answer', () => {
+    const { text } = run('patient', 'dig +trace example.com')
+    expect(text).toMatch(/com\.\s+172800\tIN\tNS\ta\.com-servers\.example\./)
+    expect(text).toMatch(/example\.com\.\s+300\tIN\tA\t93\.184\.216\.34/)
+    expect(text).toContain('ⓘ The .com step is simulated')
+  })
+
+  it('does not use or fill the device cache', () => {
+    const net = careConnect()
+    run('patient', 'dig +trace careconnect.example', net)
+    expect(run('patient', 'dnscache', net).text).toContain('is empty')
+  })
+
+  it('the resolver offline: the first query times out', () => {
+    const net = careConnect()
+    const dns = net.nodes.find((n) => n.id === 'ccdns')!
+    dns.data = { ...dns.data, isOn: false }
+    expect(run('patient', 'dig +trace www.careconnect.example', net).text).toContain(';; connection timed out; no servers could be reached')
+  })
+})

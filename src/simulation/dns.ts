@@ -176,13 +176,18 @@ export function newTransactionId(rand: () => number = Math.random): string {
 }
 
 /** The capture Info for a query: `Standard query 0x1a2b A www.careconnect.example`. */
+/** A name as Wireshark shows it: the root is <Root>. */
+function shown(name: string): string {
+  return normName(name) || '<Root>'
+}
+
 export function queryInfo(id: string, qtype: DnsRecordType, name: string): string {
-  return `Standard query ${id} ${qtype} ${normName(name)}`
+  return `Standard query ${id} ${qtype} ${shown(name)}`
 }
 
 /** The capture Info for a response, Wireshark style: the answers after the question. */
 export function responseInfo(id: string, qtype: DnsRecordType, name: string, answer: DnsAnswer): string {
-  const q = `${qtype} ${normName(name)}`
+  const q = `${qtype} ${shown(name)}`
   if (answer.status === 'NXDOMAIN') return `Standard query response ${id} No such name ${q}`
   if (answer.status === 'SERVFAIL') return `Standard query response ${id} Server failure ${q}`
   const parts = answer.records.map((r) => (r.type === 'TXT' ? 'TXT' : `${r.type} ${rdata(r).replace(/\.$/, '')}`))
@@ -193,7 +198,7 @@ export function responseInfo(id: string, qtype: DnsRecordType, name: string, ans
 export function responsePayload(qtype: DnsRecordType, name: string, answer: DnsAnswer): string {
   const head = `Reply code: ${answer.status === 'NOERROR' ? 'No error' : answer.status === 'NXDOMAIN' ? 'No such name (NXDOMAIN)' : 'Server failure (SERVFAIL)'}`
   const flags = `Authoritative: ${answer.authoritative ? 'yes (this server holds the records)' : 'no'}`
-  const q = `Query: ${normName(name)}, type ${qtype}, class IN`
+  const q = `Query: ${shown(name)}, type ${qtype}, class IN`
   if (!answer.records.length) return [head, flags, q, 'Answers: none'].join('\n')
   const lines = answer.records.map((r) => `  ${r.name}: type ${r.type}, class IN, ${r.type === 'A' || r.type === 'AAAA' ? 'addr' : 'data'} ${rdata(r)}, TTL ${r.ttl}`)
   return [head, flags, q, 'Answers:', ...lines].join('\n')

@@ -491,7 +491,7 @@ function cmdHelp(): Lines {
     out('Name lookup'),
     out('  nslookup [-type=mx] <name>     Ask the DNS server for an address (or other records)'),
     out('  dig [@server] <name> [type]    Ask the DNS server, showing the whole answer'),
-    out('       types: A AAAA CNAME MX NS TXT    +short  values only'),
+    out('       types: A AAAA CNAME MX NS TXT    +short  values only    +trace  every step from the root'),
     out('  dnscache / flushdns            Show / empty this device\'s DNS cache'),
     out('Web'),
     out('  curl [-v] http(s)://<host>     Fetch a page (-v shows every step)'),
