@@ -53,7 +53,7 @@ export function playUnreachable(
     return { lines: at(end), endMs: end }
   }
 
-  if ((route.failure === 'private' || route.failure === 'no-reply') && route.reach && route.reach.length > 1) {
+  if ((route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply') && route.reach && route.reach.length > 1) {
     const hop = scaledHop(CONV_HOP_MS)
     const legMs = (route.reach.length - 1) * hop
     const macs = firstHopMacs(route.reach, ctx.nodes)

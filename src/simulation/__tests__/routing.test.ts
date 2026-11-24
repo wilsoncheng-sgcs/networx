@@ -130,3 +130,29 @@ describe('subnets and default gateways', () => {
     expect(findSegmentPath('net', 'reception', net.nodes, net.edges)).toBeNull()
   })
 })
+
+describe('the last router must be on the destination\'s subnet', () => {
+  /** A laptop with a clinic-style address plugged into the patient's home gateway. */
+  function misplacedLaptop(ip = '10.0.0.5') {
+    const net = careConnect()
+    const patient = net.nodes.find((n) => n.id === 'patient')!
+    net.nodes.push({ ...structuredClone(patient), id: 'laptop101', data: { ...structuredClone(patient.data), label: 'Laptop 101', ip, gateway: ip.replace(/\.\d+$/, '.1'), mac: 'aa:bb:cc:06:01:01' } })
+    net.edges.push({ id: 'l101-e1', source: 'laptop101', target: 'homegw' })
+    return net
+  }
+
+  it("a device on the wrong subnet behind a gateway isn't reached: the packets never go to it", () => {
+    const { text, captures } = run('patient', 'ping 10.0.0.5', misplacedLaptop())
+    expect(text).toContain('Request timeout for icmp_seq 0')
+    expect(text).toContain("isn't on Home Gateway's network")
+    const icmp = captures.filter((c) => c.app === 'ICMP')
+    expect(icmp.length).toBeGreaterThan(0)
+    expect(icmp.every((c) => !c.route?.includes('laptop101'))).toBe(true)
+    // Home Gateway sends it out to the internet, where a private address is dropped
+    expect(icmp[0]!.route).toEqual(['patient', 'homegw', 'net'])
+  })
+
+  it('the same laptop with an address on the home LAN is reached', () => {
+    expect(run('patient', 'ping 192.168.1.50', misplacedLaptop('192.168.1.50')).text).toContain('64 bytes from 192.168.1.50')
+  })
+})

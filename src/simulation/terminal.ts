@@ -127,6 +127,7 @@ function pingFailure(route: Extract<Route, { ok: false }>, target: string, ip: s
       body = [out(header), ...[0, 1, 2].map((i) => err(`From ${srcIp} icmp_seq=${i} Destination Host Unreachable`)), ...stats(3), ...explain]
       break
     case 'private':
+    case 'not-on-network':
     case 'no-reply':
       body = [out(header), ...[0, 1, 2, 3].map((i) => out(`Request timeout for icmp_seq ${i}`)), ...stats(4), ...explain]
       break
@@ -168,7 +169,7 @@ function cmdTraceroute(args: string[], ctx: TermContext): Lines {
     let body: Lines
     if (route.failure === 'no-address' || route.failure === 'net-unreachable') {
       body = [err('traceroute: sendto: Network is unreachable'), ...explain]
-    } else if ((route.failure === 'private' || route.failure === 'no-reply') && route.reach) {
+    } else if ((route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply') && route.reach) {
       // The devices on the way still answer; after that, silence
       const answered = route.failure === 'no-reply' ? route.reach.slice(0, -1) : route.reach
       const cloudAt = answered.findIndex((id) => nodeById(id, ctx.nodes)?.data.deviceType === 'cloud')

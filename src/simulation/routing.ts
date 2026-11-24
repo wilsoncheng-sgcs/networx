@@ -25,6 +25,7 @@ export type RouteFailure =
   | 'net-unreachable'   // different subnet and no usable default gateway
   | 'host-unreachable'  // ARP got no answer (destination or gateway not on this segment)
   | 'private'           // private destination across the internet: dropped
+  | 'not-on-network'    // the last router isn't on the destination's subnet: it never hands it over
   | 'no-reply'          // the destination can't send the reply back
   | 'no-path'           // no cable path at all
 
@@ -180,6 +181,27 @@ export function routeBetween(src: NetNode, dst: NetNode | null, dstIp: string, n
     }
   }
 
+  // 2b. The router that hands the packet over must itself be on the destination's subnet — a device
+  //     plugged into a gateway with an address from another network isn't reached
+  const direct = HOST_TYPES.includes(src.data.deviceType) && !!src.data.ip && sameSubnet(src.data.ip, dstIp, maskOf(src))
+  // Only end devices: a router owns its addresses and is reached across the links between routers,
+  // and the Internet node stands for every internet host.
+  const at = direct || !HOST_TYPES.includes(dst.data.deviceType) ? -1 : deliveringRouter(path, nodes)
+  const router = at >= 0 ? nodes.find((n) => n.id === path[at]) : undefined
+  if (router && router.data.deviceType !== 'cloud' && !onNetwork(router, dstIp)) {
+    const cloud = nodes.find((n) => n.data.deviceType === 'cloud')
+    const out = cloud ? findPath(router.id, cloud.id, nodes, edges) : null
+    const outward = out && !out.includes(dst.id) ? out.slice(1) : []
+    const net = `${router.data.ip}/${subnetToCidr(maskOf(router))}`
+    const fate = outward.length
+      ? `so it sends the packet out towards the internet instead${isPrivateIp(dstIp) ? ', where a private address is dropped' : ''}`
+      : 'so it has nowhere to send the packet'
+    return {
+      ok: false, failure: 'not-on-network', reach: [...path.slice(0, at + 1), ...outward],
+      explain: `ⓘ ${dstIp} isn't on ${router.data.label}'s network (${net}). Even though ${dst.data.label} is plugged into it, ${router.data.label} only delivers to addresses on its own networks — ${fate}. Give ${dst.data.label} an address on ${router.data.label}'s network (or use dhclient).`,
+    }
+  }
+
   // 3. The reply needs a way back (replies to a private sender come back through its NAT gateway)
   if (HOST_TYPES.includes(dst.data.deviceType) && src.data.ip) {
     const back = nextHop(dst, src.data.ip, src, nodes, edges)
@@ -193,12 +215,29 @@ export function routeBetween(src: NetNode, dst: NetNode | null, dstIp: string, n
   return { ok: true, path }
 }
 
+/** Index on `path` of the router that hands the packet to the destination (skipping switches), or -1. */
+function deliveringRouter(path: string[], nodes: NetNode[]): number {
+  for (let i = path.length - 2; i >= 0; i--) {
+    const t = nodes.find((n) => n.id === path[i])?.data.deviceType ?? ''
+    if (LAYER2_TYPES.includes(t)) continue
+    return ROUTING_TYPES.includes(t) ? i : -1
+  }
+  return -1
+}
+
+/** Is `ip` on one of this router's networks (its LAN, or its WAN side)? */
+function onNetwork(router: NetNode, ip: string): boolean {
+  if (router.data.ip && sameSubnet(router.data.ip, ip, maskOf(router))) return true
+  return !!router.data.wanIp && sameSubnet(router.data.wanIp, ip, '255.255.255.0')
+}
+
 /** Short system error text for a failure, as tools print it. */
 export function errnoText(failure: RouteFailure): string {
   switch (failure) {
     case 'net-unreachable': return 'Network is unreachable'
     case 'host-unreachable': return 'No route to host'
     case 'private':
+    case 'not-on-network':
     case 'no-reply': return 'Connection timed out'
     case 'no-address': return 'Network is unreachable'
     default: return 'No route to host'

@@ -184,7 +184,7 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
   const route = routeTo(server, r.ip, ctx)
   if (!server || !route.ok) {
     // Subnet, gateway or private-address rules stop it: show how far the SYN gets, then why
-    const timeout = !route.ok && (route.failure === 'private' || route.failure === 'no-reply')
+    const timeout = !route.ok && (route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply')
     const why = route.ok ? 'No route to host' : errnoText(route.failure)
     const failLines = [
       ...L(timeout
