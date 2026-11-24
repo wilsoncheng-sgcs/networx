@@ -58,7 +58,9 @@ export function playUnreachable(
     return { lines: at(end), endMs: end }
   }
 
-  const travels = route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply'
+  const travels = route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply' || route.failure === 'blocked'
+  // A firewall's drop is marked with a red ✕ where the packet stops
+  const drop = (pkts: PacketAnim[]) => (route.failure === 'blocked' && pkts.length ? [...pkts.slice(0, -1), { ...pkts[pkts.length - 1]!, dropped: true }] : pkts)
   if (travels && route.reach && route.reach.length > 1) {
     const hop = scaledHop(CONV_HOP_MS)
     const legMs = (route.reach.length - 1) * hop
@@ -74,19 +76,19 @@ export function playUnreachable(
         srcIp: src.data.ip, dstIp, ...macs, encrypted: false,
       }
       if (attempt.kind === 'dns') {
-        packets.push(...leg(route.reach, ctx.edges, 'DNS', i ? 'DNS (again)' : 'DNS query', t, false, hop))
+        packets.push(...drop(leg(route.reach, ctx.edges, 'DNS', i ? 'DNS (again)' : 'DNS query', t, false, hop)))
         captures.push({
           ...base, srcPort: clientPort, dstPort: 53, transport: 'UDP', app: 'DNS', length: 20 + 8 + 17 + attempt.name.length,
           info: `Standard query A ${attempt.name}`, payload: `Query: ${attempt.name}, type A, class IN`,
         })
       } else if (attempt.kind === 'tcp') {
-        packets.push(...leg(route.reach, ctx.edges, 'TCP', i ? 'SYN (again)' : 'SYN', t, false, hop))
+        packets.push(...drop(leg(route.reach, ctx.edges, 'TCP', i ? 'SYN (again)' : 'SYN', t, false, hop)))
         captures.push({
           ...base, srcPort: clientPort, dstPort: attempt.port, transport: 'TCP', tcpFlags: 'SYN', app: null, length: 40,
           info: `${i ? '[TCP Retransmission] ' : ''}[SYN] Seq=0`,
         })
       } else {
-        packets.push(...leg(route.reach, ctx.edges, 'ICMP', 'ICMP', t, false, hop))
+        packets.push(...drop(leg(route.reach, ctx.edges, 'ICMP', 'ICMP', t, false, hop)))
         captures.push({
           ...base, transport: 'ICMP', app: 'ICMP', length: 84,
           info: `Echo (ping) request  id=0x0001, seq=${i}, ttl=64 (no response found!)`,

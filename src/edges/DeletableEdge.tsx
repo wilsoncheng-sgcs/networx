@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Radio } from 'lucide-react'
 import { BaseEdge, EdgeLabelRenderer, getBezierPath } from '@xyflow/react'
 import type { EdgeProps } from '@xyflow/react'
@@ -11,13 +11,18 @@ import { PROTOCOL_COLORS } from '../components/protocolColors'
 function PacketDot({ edgePath, packet }: { edgePath: string; packet: PacketAnim }) {
   const ref = useRef<SVGAnimationElement>(null)
   const color = PROTOCOL_COLORS[packet.protocol] ?? '#6b7280'
+  const [landed, setLanded] = useState(false)
 
   useEffect(() => {
     // begin="indefinite" means the animation only starts when beginElement() is called.
     // Calling it here (on mount) starts it immediately — avoids the SVG SMIL "document
     // time 0" problem where begin="0ms" fires in the past and jumps to fill="freeze".
     ref.current?.beginElement()
-  }, [])
+    // A dropped packet shows its ✕ once it reaches the firewall
+    if (!packet.dropped) return
+    const t = setTimeout(() => setLanded(true), packet.durationMs)
+    return () => clearTimeout(t)
+  }, [packet.dropped, packet.durationMs])
 
   return (
     <g>
@@ -30,7 +35,12 @@ function PacketDot({ edgePath, packet }: { edgePath: string; packet: PacketAnim 
         repeatCount="1"
         {...(packet.reverse ? { keyPoints: '1;0', keyTimes: '0;1', calcMode: 'linear' } : {})}
       />
-      <circle r={5} fill={color} stroke="white" strokeWidth={1.5} cx={0} cy={0} />
+      <circle r={landed ? 8 : 5} fill={landed ? 'white' : color} stroke={landed ? '#dc2626' : 'white'} strokeWidth={landed ? 2 : 1.5} cx={0} cy={0} />
+      {landed && (
+        <text fontSize={11} fill="#dc2626" fontWeight="bold" textAnchor="middle" dy={4} data-testid="packet-dropped">
+          ✕
+        </text>
+      )}
       <text
         fontSize={8}
         fill={color}
@@ -41,7 +51,7 @@ function PacketDot({ edgePath, packet }: { edgePath: string; packet: PacketAnim 
         strokeWidth={3}
         paintOrder="stroke"
       >
-        {packet.label}
+        {landed ? 'dropped' : packet.label}
       </text>
     </g>
   )

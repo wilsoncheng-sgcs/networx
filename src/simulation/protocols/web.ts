@@ -181,10 +181,10 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
 
   // 2. Is anything listening on that port?
   const server = r.node
-  const route = routeTo(server, r.ip, ctx)
+  const route = routeTo(server, r.ip, ctx, { protocol: 'TCP', port })
   if (!server || !route.ok) {
     // Subnet, gateway or private-address rules stop it: show how far the SYN gets, then why
-    const timeout = !route.ok && (route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply')
+    const timeout = !route.ok && (route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply' || route.failure === 'blocked')
     const why = route.ok ? 'No route to host' : errnoText(route.failure)
     const failLines = [
       ...L(timeout

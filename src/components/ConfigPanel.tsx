@@ -1,11 +1,19 @@
 import { useState } from 'react'
-import { X, Plus, Trash2, Power, RotateCcw } from 'lucide-react'
+import { X, Plus, Trash2, Power, RotateCcw, ChevronUp, ChevronDown } from 'lucide-react'
 import { useNetworkStore } from '../store'
 import type { FirewallRule, DnsRecord, StoredFile, Mailbox, NetNode, CertificateState } from '../types'
 import { DEFAULT_ACCOUNT, defaultMailboxes } from '../simulation/defaults'
 import { PRESETS } from '../simulation/presets'
 import { servicesFor, isListening } from '../simulation/services'
 
+
+/** A copy of `list` with the item at `from` moved to `to`. */
+function moveItem<T>(list: T[], from: number, to: number): T[] {
+  const copy = [...list]
+  const [item] = copy.splice(from, 1)
+  copy.splice(to, 0, item!)
+  return copy
+}
 
 interface Props {
   nodeId: string
@@ -492,21 +500,50 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
                 <Plus size={12} /> Add Rule
               </button>
             </div>
-            <p className="text-xs text-gray-400 mb-3">Rules are evaluated top-to-bottom. First match wins.</p>
+            <p className="text-xs text-gray-400 mb-1">
+              Checked when a connection starts, top to bottom: the first rule that matches wins; no match → allowed.
+              Replies to an allowed connection always get through.
+            </p>
+            <p className="text-xs text-gray-400 mb-3">
+              <strong>Inbound</strong> = started from the internet side; <strong>Outbound</strong> = started from this network.
+              A denied connection is dropped, so the client times out.
+            </p>
             <div className="space-y-2">
-              {data.rules.map((rule) => (
+              {data.rules.map((rule, idx) => (
                 <div
                   key={rule.id}
+                  data-testid="firewall-rule"
                   className={`rounded-lg p-3 text-xs space-y-2 relative border ${
                     rule.action === 'allow' ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'
                   }`}
                 >
-                  <button
-                    className="absolute top-2 right-2 text-gray-300 hover:text-red-400 transition-colors"
-                    onClick={() => removeRule(nodeId, rule.id)}
-                  >
-                    <Trash2 size={12} />
-                  </button>
+                  <div className="absolute top-2 right-2 flex flex-col items-center gap-0.5">
+                    <button
+                      className="text-gray-300 hover:text-red-400 transition-colors"
+                      onClick={() => removeRule(nodeId, rule.id)}
+                      title="Delete rule"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                    <button
+                      className="text-gray-400 hover:text-gray-700 disabled:opacity-30 transition-colors"
+                      disabled={idx === 0}
+                      onClick={() => upd({ rules: moveItem(data.rules, idx, idx - 1) })}
+                      title="Move up (checked earlier)"
+                      data-testid="rule-up"
+                    >
+                      <ChevronUp size={13} />
+                    </button>
+                    <button
+                      className="text-gray-400 hover:text-gray-700 disabled:opacity-30 transition-colors"
+                      disabled={idx === data.rules.length - 1}
+                      onClick={() => upd({ rules: moveItem(data.rules, idx, idx + 1) })}
+                      title="Move down (checked later)"
+                    >
+                      <ChevronDown size={13} />
+                    </button>
+                  </div>
+                  <div className="text-[10px] font-semibold text-gray-500">Rule {idx + 1}</div>
                   <div className="grid grid-cols-3 gap-2 pr-5">
                     {/* Direction */}
                     <div>

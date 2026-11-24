@@ -125,6 +125,8 @@ export interface PacketAnim {
   delayMs: number
   durationMs: number
   reverse?: boolean
+  /** Dropped by a firewall at the end of this hop: shown with a red ✕. */
+  dropped?: boolean
 }
 
 export type AnimSpeed = 0.5 | 1 | 3 | 'instant'

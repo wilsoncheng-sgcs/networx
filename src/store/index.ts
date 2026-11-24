@@ -326,7 +326,8 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
     packets.forEach((packet) => {
       clock.after(packet.delayMs, () => {
         set((s) => ({ activePackets: [...s.activePackets, packet] }))
-        clock.after(packet.durationMs + 150, () => {
+        // A packet a firewall dropped stays a moment longer, so its ✕ can be seen
+        clock.after(packet.durationMs + (packet.dropped ? 1500 : 150), () => {
           set((s) => ({ activePackets: s.activePackets.filter((p) => p.id !== packet.id) }))
         })
       })

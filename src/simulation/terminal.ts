@@ -56,7 +56,7 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
   if (isResolveError(r)) return [...lines, ...resolveErrorLines('ping', r, afterDns)]
   const header = isIp(target) ? `PING ${target}: 56 data bytes` : `PING ${target} (${r.ip}): 56 data bytes`
   const dst = r.node
-  const route = routeTo(dst, r.ip, ctx)
+  const route = routeTo(dst, r.ip, ctx, { protocol: 'ICMP' })
   if (!route.ok) return [...lines, ...pingFailure(route, target, r.ip, header, src.data.ip, ctx, afterDns)]
   if (!dst) return [...lines, err('ping: sendmsg: No route to host', afterDns)]
   const path = route.path
@@ -125,6 +125,7 @@ function pingFailure(route: Extract<Route, { ok: false }>, target: string, ip: s
     case 'private':
     case 'not-on-network':
     case 'no-reply':
+    case 'blocked':
       body = [out(header), ...[0, 1, 2, 3].map((i) => out(`Request timeout for icmp_seq ${i}`)), ...stats(4), ...explain]
       break
     default:
@@ -139,7 +140,7 @@ function pingFailure(route: Extract<Route, { ok: false }>, target: string, ip: s
  * routers. Switches, hubs and access points never appear. With `dst`, the last line is the destination;
  * without it the probes die at the end of `path` (and an Internet node there drops them at the ISP).
  */
-function tracerouteHops(path: string[], ctx: TermContext, dst?: { ip: string; label: string }): Lines {
+function tracerouteHops(path: string[], ctx: TermContext, dst?: { ip: string; label: string }, crossedInternet = false): Lines {
   const lines: Lines = []
   let n = 0
   let pastInternet = false
@@ -153,7 +154,7 @@ function tracerouteHops(path: string[], ctx: TermContext, dst?: { ip: string; la
     if (!node) continue
     const last = i === path.length - 1
     if (node.data.deviceType === 'cloud') {
-      const backbone = last && !dst ? INTERNET_HOPS.slice(0, 1) : INTERNET_HOPS
+      const backbone = last && !dst && !crossedInternet ? INTERNET_HOPS.slice(0, 1) : INTERNET_HOPS
       backbone.forEach((h) => hop(h.ip, h.label))
       pastInternet = true
       if (last && dst) hop(dst.ip, dst.label)
@@ -180,17 +181,19 @@ function cmdTraceroute(args: string[], ctx: TermContext): Lines {
   if (isResolveError(r)) return [...lines, ...resolveErrorLines('traceroute', r, afterDns)]
   const dst = r.node
   const header = out(`traceroute to ${target} (${r.ip}), 30 hops max, 60 byte packets`)
-  const route = routeTo(dst, r.ip, ctx)
+  const route = routeTo(dst, r.ip, ctx, { protocol: 'ICMP' })
   if (!route.ok) {
     const explain = route.explain ? [info(route.explain)] : []
     const silent = (from: number) => [0, 1, 2].map((i) => out(` ${from + i}  * * *`))
     let body: Lines
     if (route.failure === 'no-address' || route.failure === 'net-unreachable') {
       body = [err('traceroute: sendto: Network is unreachable'), ...explain]
-    } else if ((route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply') && route.reach) {
-      // The devices on the way still answer; after that, silence
-      const answered = route.failure === 'no-reply' ? route.reach.slice(0, -1) : route.reach
-      const hops = tracerouteHops(answered, ctx)
+    } else if ((route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply' || route.failure === 'blocked') && route.reach) {
+      // The devices on the way still answer; after that, silence (a firewall that drops a probe doesn't answer it)
+      const beyond = route.failure === 'no-reply' || route.failure === 'blocked'
+      const answered = beyond ? route.reach.slice(0, -1) : route.reach
+      // Dropped at the ISP (private, not-on-network) vs carried across the internet to a device beyond it
+      const hops = tracerouteHops(answered, ctx, undefined, beyond)
       body = [header, ...hops, ...silent(hops.length + 1), ...explain]
     } else {
       body = [header, ...silent(1), ...explain]
@@ -354,7 +357,7 @@ function cmdSsh(args: string[], ctx: TermContext): Lines {
   if (!target) return [err('Usage: ssh <ip-address>')]
   const dst = nodeForIp(target, ctx)
   const src = self(ctx)
-  const route = routeTo(dst, target, ctx)
+  const route = routeTo(dst, target, ctx, { protocol: 'TCP', port: 22 })
   if (!route.ok) {
     const lines = [err(`ssh: connect to host ${target} port 22: ${errnoText(route.failure)}`), ...(route.explain ? [info(route.explain)] : [])]
     return playUnreachable(route, { kind: 'tcp', port: 22 }, target, ctx, lines).lines

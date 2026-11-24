@@ -114,10 +114,12 @@ export function makeDefaultData(type: DeviceType, id: string): NodeData {
       break
     case 'firewall':
       base.ip = nextIp()
+      // Inbound: only SSH, HTTPS and HTTP are let in; outbound and replies are allowed (spec §8)
       base.rules = [
-        { id: 'r1', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '22', action: 'allow' },
-        { id: 'r2', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '80', action: 'allow' },
-        { id: 'r3', direction: 'in', protocol: 'ANY', srcIp: '*', dstIp: '*', port: '*', action: 'deny' },
+        { id: 'r1', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '22',  action: 'allow' },
+        { id: 'r2', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '443', action: 'allow' },
+        { id: 'r3', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '80',  action: 'allow' },
+        { id: 'r4', direction: 'in', protocol: 'ANY', srcIp: '*', dstIp: '*', port: '*',   action: 'deny' },
       ]
       break
     case 'gateway':
@@ -130,10 +132,9 @@ export function makeDefaultData(type: DeviceType, id: string): NodeData {
       base.ssid = 'HomeNet-5G'
       base.wpaKey = 'password123'
       base.band = '5GHz'
+      // A typical home gateway: nothing from the internet gets in; outbound and replies are allowed (spec §8)
       base.rules = [
-        { id: 'r1', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '22', action: 'allow' },
-        { id: 'r2', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '80', action: 'allow' },
-        { id: 'r3', direction: 'in', protocol: 'ANY', srcIp: '*', dstIp: '*', port: '*', action: 'deny' },
+        { id: 'r1', direction: 'in', protocol: 'ANY', srcIp: '*', dstIp: '*', port: '*', action: 'deny' },
       ]
       break
     case 'dns':

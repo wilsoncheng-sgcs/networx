@@ -39,7 +39,7 @@ export function connectTo(
     return { lines: playLookup(r, ctx, lines).lines }
   }
   const dnsLeg = dnsConversation(r, ctx)
-  const route = routeTo(r.node, r.ip, ctx)
+  const route = routeTo(r.node, r.ip, ctx, { protocol: 'TCP', port })
   if (!route.ok || !r.node) {
     // Subnet, gateway or private-address rules stop it: show how far the SYN gets, then why
     const why = route.ok ? 'No route to host' : errnoText(route.failure)

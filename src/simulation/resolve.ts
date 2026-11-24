@@ -1,7 +1,7 @@
 import type { NetNode, NetEdge } from '../types'
 import type { TermContext } from './context'
 import { nodeById } from './network'
-import { routeBetween, nodeHasIp, type Route } from './routing'
+import { routeBetween, nodeHasIp, type Route, type Flow } from './routing'
 import { isListening } from './services'
 
 /** Well-known internet names, answered (non-authoritatively) when the local DNS server has no record. */
@@ -79,13 +79,13 @@ export function isResolveError(r: Resolution): r is ResolveError {
 }
 
 /** The route from this device to `dst` answering on `dstIp`, under the address rules (routing.ts). */
-export function routeTo(dst: NetNode | null, dstIp: string, ctx: TermContext): Route {
+export function routeTo(dst: NetNode | null, dstIp: string, ctx: TermContext, flow?: Flow): Route {
   const src = nodeById(ctx.selfId, ctx.nodes)
   if (!src) return { ok: false, failure: 'no-path', reach: null, explain: '' }
   if (dst && dst.data.isOn === false) {
     return { ok: false, failure: 'no-reply', reach: null, explain: `ⓘ ${dst.data.label} is switched off.` }
   }
-  return routeBetween(src, dst, dstIp, ctx.nodes, ctx.edges)
+  return routeBetween(src, dst, dstIp, ctx.nodes, ctx.edges, flow)
 }
 
 function reachable(node: NetNode | undefined, ip: string, ctx: TermContext): node is NetNode {
@@ -175,7 +175,7 @@ function askDnsServer(ctx: TermContext):
   // Route to the server even if it is switched off: the queries still travel as far as they can
   const route: Route = server && server.id === src.id
     ? { ok: true, path: [src.id] }
-    : routeBetween(src, server, serverIp, ctx.nodes, ctx.edges)
+    : routeBetween(src, server, serverIp, ctx.nodes, ctx.edges, { protocol: 'UDP', port: 53 })
   if (!route.ok) {
     // The client's own settings stop it (no address, no usable gateway): keep that explanation
     const clientSide = route.failure === 'no-address' || route.failure === 'net-unreachable'
@@ -183,7 +183,7 @@ function askDnsServer(ctx: TermContext):
     const failed: Failed = route.failure === 'no-path' ? { ...route, failure: 'no-reply' } : route
     const explain = clientSide
       ? `ⓘ Names can't be looked up: the DNS server (${serverIp}) can't be reached. ${route.explain.replace(/^ⓘ /, '')}`
-      : noAnswer
+      : route.failure === 'blocked' ? `${noAnswer} ${route.explain.replace(/^ⓘ /, '')}` : noAnswer
     return { ok: false, timeout: { serverIp, server, route: failed }, explain }
   }
   if (!server || !answersDns(server, serverIp)) {
