@@ -1,6 +1,7 @@
 import type { NetNode } from '../types'
 import type { TermContext } from './context'
-import { findPath, nodeByIp } from './network'
+import { nodeById } from './network'
+import { routeBetween, nodeHasIp, type Route } from './routing'
 
 /** Well-known internet names, answered (non-authoritatively) when the local DNS server has no record. */
 export const PUBLIC_IPS: Record<string, string> = {
@@ -45,6 +46,8 @@ export interface ResolveError {
   error: 'nxdomain' | 'no-dns' | 'no-route'
   dnsServerNode: NetNode | null
   dnsServerIp: string | null
+  /** For no-dns: why the DNS server can't be reached (an ⓘ line), when the address rules are the reason. */
+  explain?: string
 }
 
 export type Resolution = Resolved | ResolveError
@@ -53,8 +56,23 @@ export function isResolveError(r: Resolution): r is ResolveError {
   return 'error' in r
 }
 
+/** The route from this device to `dst` answering on `dstIp`, under the address rules (routing.ts). */
+export function routeTo(dst: NetNode | null, dstIp: string, ctx: TermContext): Route {
+  const src = nodeById(ctx.selfId, ctx.nodes)
+  if (!src) return { ok: false, failure: 'no-path', reach: null, explain: '' }
+  if (dst && dst.data.isOn === false) {
+    return { ok: false, failure: 'no-reply', reach: null, explain: `ⓘ ${dst.data.label} is switched off.` }
+  }
+  return routeBetween(src, dst, dstIp, ctx.nodes, ctx.edges)
+}
+
+/** The address this device would use to reach a DNS server or the internet's resolver. */
+function serviceIp(node: NetNode): string {
+  return node.data.deviceType === 'cloud' ? PUBLIC_RESOLVER_IP : node.data.ip
+}
+
 function reachable(node: NetNode | undefined, ctx: TermContext): node is NetNode {
-  return !!node && node.data.isOn !== false && !!findPath(ctx.selfId, node.id, ctx.nodes, ctx.edges)
+  return !!node && node.data.isOn !== false && routeTo(node, serviceIp(node), ctx).ok
 }
 
 function reachableCloud(ctx: TermContext): NetNode | undefined {
@@ -63,14 +81,16 @@ function reachableCloud(ctx: TermContext): NetNode | undefined {
 
 const publicIpSet = () => new Set(Object.values(PUBLIC_IPS))
 
-/** Which node answers for `ip`, as seen from this device: a reachable node with that IP, else the internet. */
-function nodeForIp(ip: string, ctx: TermContext): NetNode | null {
-  const node = nodeByIp(ip, ctx.nodes)
-  if (node && node.data.deviceType !== 'cloud') {
-    return findPath(ctx.selfId, node.id, ctx.nodes, ctx.edges) ? node : null
-  }
-  const cloud = reachableCloud(ctx)
-  return cloud && publicIpSet().has(ip) ? cloud : null
+/**
+ * Which node answers for `ip`, as seen from this device. The same private address can exist in two
+ * networks: prefer the one this device can actually reach. Public addresses Networx knows are the internet.
+ * The node may still be unreachable — the caller checks the route and explains why.
+ */
+export function nodeForIp(ip: string, ctx: TermContext): NetNode | null {
+  const candidates = ctx.nodes.filter((n) => n.data.deviceType !== 'cloud' && nodeHasIp(n, ip))
+  if (candidates.length) return candidates.find((n) => routeTo(n, ip, ctx).ok) ?? candidates[0]!
+  if (!publicIpSet().has(ip)) return null
+  return reachableCloud(ctx) ?? ctx.nodes.find((n) => n.data.deviceType === 'cloud') ?? null
 }
 
 /**
@@ -80,9 +100,8 @@ function nodeForIp(ip: string, ctx: TermContext): NetNode | null {
 export function resolveTarget(nameOrIp: string, ctx: TermContext): Resolution {
   const name = nameOrIp
   if (isIp(nameOrIp)) {
-    const node = nodeForIp(nameOrIp, ctx)
-    if (!node) return { name, error: 'no-route', dnsServerNode: null, dnsServerIp: null }
-    return { name, ip: nameOrIp, node, dnsServerNode: null, dnsServerIp: null, authoritative: true }
+    // No DNS needed. node is null when no device has this address (the route check explains it)
+    return { name, ip: nameOrIp, node: nodeForIp(nameOrIp, ctx), dnsServerNode: null, dnsServerIp: null, authoritative: true }
   }
 
   const lower = nameOrIp.toLowerCase()
@@ -102,7 +121,18 @@ export function resolveTarget(nameOrIp: string, ctx: TermContext): Resolution {
     return { name, ip, node: cloud, dnsServerNode: cloud, dnsServerIp: PUBLIC_RESOLVER_IP, authoritative: false }
   }
 
-  return { name, error: 'no-dns', dnsServerNode: null, dnsServerIp: null }
+  return { name, error: 'no-dns', dnsServerNode: null, dnsServerIp: null, explain: dnsUnreachableExplain(ctx) }
+}
+
+/** Why no DNS server can be reached from this device, as an ⓘ line (undefined if there simply isn't one). */
+export function dnsUnreachableExplain(ctx: TermContext): string | undefined {
+  const dns = ctx.nodes.find((n) => n.data.deviceType === 'dns' && n.data.isOn !== false)
+  const target = dns ?? ctx.nodes.find((n) => n.data.deviceType === 'cloud')
+  if (!target) return undefined
+  const ip = serviceIp(target)
+  const route = routeTo(target, ip, ctx)
+  if (route.ok || !route.explain) return undefined
+  return `ⓘ Names can't be looked up: the DNS server (${ip}) can't be reached. ${route.explain.replace(/^ⓘ /, '')}`
 }
 
 /** The DNS server this device would ask: the DNS node if reachable, else the public resolver via the internet. */

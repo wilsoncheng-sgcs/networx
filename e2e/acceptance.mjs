@@ -645,6 +645,41 @@ await scenario(20, 'Step mode', async () => {
   check('leaving step mode finishes the command', (await output()).includes('CareConnect'))
 })
 
+await scenario(21, 'Private addresses and default gateways', async () => {
+  await clearCapture()
+  await terminalOn("Patient's Laptop")
+  await clearTerm()
+  await cmd('ping 10.0.0.11')
+  let o = await output()
+  check("patient can't ping the clinic's private 10.0.0.11", o.includes('Request timeout for icmp_seq 0') && !o.includes('bytes from'))
+  check('ⓘ explains private addresses', o.includes('ⓘ 10.0.0.11 is a private address (10.0.0.0/8)'))
+  await page.waitForTimeout(300)
+  const icmp = (await rowTexts()).map(cols).filter((x) => x.proto === 'ICMP')
+  check('capture: echo requests only, no replies', icmp.length === 4 && icmp.every((x) => x.info.includes('request')), icmp.map((x) => x.info).join(' | '))
+  await shot('21a-private-address')
+  await clearTerm()
+  await cmd('ping 198.51.100.77')
+  check("the clinic gateway's public address answers", (await output()).includes('64 bytes from 198.51.100.77'))
+
+  // Remove the Reception PC's default gateway in Configure
+  await selectNode('Reception PC')
+  await openTab('Configure')
+  const gw = aside().locator('label:has-text("Default Gateway") + input')
+  await gw.fill('')
+  await terminalOn('Reception PC')
+  await clearTerm()
+  await cmd('ping 203.0.113.80')
+  o = await output()
+  check('no default gateway: Network is unreachable', o.includes('ping: sendto: Network is unreachable') && o.includes('no default gateway'))
+  await clearTerm()
+  await cmd('ping 10.0.0.13')
+  check('…but the local network still works', (await output()).includes('64 bytes from 10.0.0.13'))
+  await shot('21b-no-gateway')
+  await selectNode('Reception PC')
+  await openTab('Configure')
+  await aside().locator('label:has-text("Default Gateway") + input').fill('10.0.0.1')
+})
+
 await scenario(13, 'Layout at 1280×800 and 1440×900', async () => {
   if (!(await page.getByTestId('capture-drawer').isVisible().catch(() => false))) await page.getByTestId('capture-toggle').click()
   for (const [w, h] of [[1280, 800], [1440, 900]]) {

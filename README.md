@@ -68,6 +68,9 @@ DNS, FTP, SFTP, SSL, TLS, SMTP, POP3, IMAP”* (SE-12-03). It adds:
 - **Tap a link** — capture only what crosses one connection, with that link's MAC addresses
 - **Step mode** — pause before each packet of a conversation; Next or the space bar plays it
 - **Layer labels** by name (Application, Internet, Link) with the OSI equivalent, and DHCP/SSH capture records
+- **Subnets, default gateways and private addresses** decide what can reach what: a wrong mask or gateway breaks
+  connectivity (with an ⓘ explaining why), and private 10.x / 172.16–31.x / 192.168.x addresses can't be reached
+  across the internet. DHCP only reaches a server on the same network segment
 - Vitest unit tests: `npm run test`; headless acceptance run: `npm run acceptance` (with `npm run preview` running)
 
 The original copyright and MIT licence are unchanged.

@@ -1,11 +1,13 @@
 import type { NetNode, TerminalLine } from '../../types'
 import { type TermContext, type Lines, out, err, info, self } from '../context'
-import { resolveTarget, isResolveError, isIp } from '../resolve'
+import { resolveTarget, isResolveError, isIp, routeTo } from '../resolve'
+import { errnoText } from '../routing'
+import { playUnreachable } from '../unreachable'
 import { isListening } from '../services'
 import {
   type Step, type CertInfo, type CertProblem, type Leg,
   newConversation, tcpOpen, tcpRefused, tcpClose, tlsHandshake, tlsRejected, certificateFor, certProblem, formatCertDate,
-  dnsConversation, runConversations, pathTo, byteLength,
+  dnsConversation, runConversations, byteLength,
 } from '../exchange'
 
 // ── URLs ─────────────────────────────────────────────────────────────────────
@@ -113,7 +115,7 @@ export function pageFor(server: NetNode, host: string, ip: string): string {
 
 // ── Fetching a URL (shared by curl and the browser) ─────────────────────────
 
-export type WebFailure = 'bad-url' | 'nxdomain' | 'no-dns' | 'no-route' | 'refused' | 'cert'
+export type WebFailure = 'bad-url' | 'nxdomain' | 'no-dns' | 'no-route' | 'unreachable' | 'timeout' | 'refused' | 'cert'
 
 export interface WebResult {
   ok: boolean
@@ -122,6 +124,8 @@ export interface WebResult {
   ip?: string
   body?: string
   cert?: CertInfo
+  /** Why the address couldn't be reached (subnet, gateway or private-address rules). */
+  explain?: string
   /** The server answered 301: where it points (the browser follows it). */
   redirect?: string
   /** Set when the certificate failed the check (whether or not `insecure` let the request go on). */
@@ -164,7 +168,7 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
   if (isResolveError(r)) {
     const failLines = r.error === 'no-route'
       ? L(err(`curl: (7) Failed to connect to ${host} port ${port} after 0 ms: No route to host`))
-      : L(err(`curl: (6) Could not resolve host: ${host}`))
+      : [...L(err(`curl: (6) Could not resolve host: ${host}`)), ...(r.explain ? L(info(r.explain)) : [])]
     const dnsLeg = dnsConversation(r, ctx, failLines)
     if (!dnsLeg) return { ok: false, url, failure: r.error, lines: failLines, endMs: 0 }
     const run = runConversations([dnsLeg], ctx)
@@ -177,13 +181,28 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
 
   // 2. Is anything listening on that port?
   const server = r.node
-  const path2 = server ? pathTo(server, ctx) : null
-  if (!server || !path2) {
-    const failLines = L(err(`curl: (7) Failed to connect to ${host} port ${port} after 0 ms: No route to host`))
-    if (dnsLeg) dnsLeg.conv.steps[1]!.lines = [...resolvedLines, ...failLines]
-    const run = runConversations(legs, ctx)
-    return { ok: false, url, failure: 'no-route', lines: [...immediate, ...run.lines, ...(dnsLeg ? [] : failLines)], endMs: run.endMs }
+  const route = routeTo(server, r.ip, ctx)
+  if (!server || !route.ok) {
+    // Subnet, gateway or private-address rules stop it: show how far the SYN gets, then why
+    const timeout = !route.ok && (route.failure === 'private' || route.failure === 'no-reply')
+    const why = route.ok ? 'No route to host' : errnoText(route.failure)
+    const failLines = [
+      ...L(timeout
+        ? err(`curl: (28) Failed to connect to ${host} port ${port} after 75000 ms: Timeout was reached`)
+        : err(`curl: (7) Failed to connect to ${host} port ${port} after 0 ms: ${why}`)),
+      ...(!route.ok && route.explain ? L(info(route.explain)) : []),
+    ]
+    const dns = runConversations(legs, ctx)
+    const played = route.ok
+      ? { lines: failLines.map((l) => ({ ...l, delayMs: dns.endMs })), endMs: dns.endMs }
+      : playUnreachable(route, { kind: 'tcp', port }, r.ip, ctx, failLines, dns.endMs)
+    return {
+      ok: false, url, failure: timeout ? 'timeout' : route.ok ? 'no-route' : 'unreachable', ip: r.ip,
+      explain: route.ok ? undefined : route.explain,
+      lines: [...immediate, ...dns.lines, ...played.lines], endMs: played.endMs,
+    }
   }
+  const path2 = route.path
 
   const serviceId = tls ? 'https' : 'http'
   const listening = isListening(server, serviceId) && port === (tls ? 443 : 80)

@@ -1,8 +1,11 @@
 import type { NetNode, TerminalLine } from '../../types'
 import type { TermContext, Lines } from '../context'
-import { resolveTarget, isResolveError, type Resolved } from '../resolve'
+import { resolveTarget, isResolveError, routeTo, type Resolved } from '../resolve'
+import { errnoText } from '../routing'
+import { playUnreachable } from '../unreachable'
+import { info } from '../context'
 import { isListening, serviceById, type ServiceId } from '../services'
-import { type Leg, type Step, dnsConversation, newConversation, pathTo, tcpRefused, runConversations } from '../exchange'
+import { type Leg, type Step, dnsConversation, newConversation, tcpRefused, runConversations } from '../exchange'
 
 export interface Target {
   r: Resolved
@@ -22,23 +25,30 @@ export interface Failure {
  */
 export function connectTo(
   host: string,
+  port: number,
   ctx: TermContext,
-  messages: { unresolved: Lines; noRoute: Lines },
+  messages: { unresolved: Lines; noRoute: (why: string) => Lines },
 ): Target | Failure {
   const r = resolveTarget(host, ctx)
   if (isResolveError(r)) {
-    const lines = r.error === 'no-route' ? messages.noRoute : messages.unresolved
+    const lines = [
+      ...(r.error === 'no-route' ? messages.noRoute('No route to host') : messages.unresolved),
+      ...(r.explain ? [info(r.explain)] : []),
+    ]
     const dnsLeg = dnsConversation(r, ctx, lines)
     return dnsLeg ? { lines: runConversations([dnsLeg], ctx).lines } : { lines }
   }
   const dnsLeg = dnsConversation(r, ctx)
-  const server = r.node
-  const path = server ? pathTo(server, ctx) : null
-  if (!server || !path) {
-    if (dnsLeg) dnsLeg.conv.steps[1]!.lines = messages.noRoute
-    return dnsLeg ? { lines: runConversations([dnsLeg], ctx).lines } : { lines: messages.noRoute }
+  const route = routeTo(r.node, r.ip, ctx)
+  if (!route.ok || !r.node) {
+    // Subnet, gateway or private-address rules stop it: show how far the SYN gets, then why
+    const why = route.ok ? 'No route to host' : errnoText(route.failure)
+    const lines = [...messages.noRoute(why), ...(!route.ok && route.explain ? [info(route.explain)] : [])]
+    const dns = runConversations(dnsLeg ? [dnsLeg] : [], ctx)
+    if (route.ok) return { lines: [...dns.lines, ...lines.map((l) => ({ ...l, delayMs: dns.endMs }))] }
+    return { lines: [...dns.lines, ...playUnreachable(route, { kind: 'tcp', port }, r.ip, ctx, lines, dns.endMs).lines] }
   }
-  return { r, server, path, legs: dnsLeg ? [dnsLeg] : [] }
+  return { r, server: r.node, path: route.path, legs: dnsLeg ? [dnsLeg] : [] }
 }
 
 export function isFailure(t: Target | Failure): t is Failure {

@@ -184,7 +184,7 @@ describe('SMTP relay on port 25', () => {
     const ccmail = net.nodes.find((n) => n.id === 'ccmail')!
     net.nodes.push({
       ...structuredClone(ccmail), id: 'gpmail', position: { x: 0, y: 0 },
-      data: { ...structuredClone(ccmail.data), label: 'GP Mail', ip: '198.51.100.7', mac: 'aa:bb:cc:09:00:07', mailDomain: 'gp-clinic.example',
+      data: { ...structuredClone(ccmail.data), label: 'GP Mail', ip: '198.51.100.7', gateway: '198.51.100.1', mac: 'aa:bb:cc:09:00:07', mailDomain: 'gp-clinic.example',
         mailboxes: [{ address: 'referrals@gp-clinic.example', password: 'x', messages: [] }] },
     })
     net.edges.push({ id: 'gp-e1', source: 'net', target: 'gpmail' } as typeof net.edges[number])

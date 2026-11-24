@@ -80,6 +80,15 @@ export default function Browser({ nodeId }: Props) {
           case 'cert':
             setError({ url: parsed.href, kind: 'cert', host, code: result.problem?.browserCode, message: result.problem?.explain ?? 'The certificate failed the check.' })
             break
+          case 'timeout':
+          case 'unreachable': {
+            const why = (result.explain ?? '').replace(/^ⓘ /, '')
+            const [lead, code] = result.failure === 'timeout'
+              ? [`${host} took too long to respond.`, 'ERR_CONNECTION_TIMED_OUT']
+              : [`${host} can't be reached from this device.`, 'ERR_ADDRESS_UNREACHABLE']
+            setError({ url: parsed.href, kind: 'unreachable', message: [lead, why, code].filter(Boolean).join('\n\n') })
+            break
+          }
           case 'no-dns':
             setError({ url: parsed.href, kind: 'unresolved', message: `${host} could not be resolved.\n\nNo DNS server is reachable from this device.` })
             break

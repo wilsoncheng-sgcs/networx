@@ -1,7 +1,7 @@
 import type { Mailbox, MailMessage, NetNode, NodeData } from '../../types'
 import { type TermContext, type Lines, out, err, info, self } from '../context'
 import { type Step, type Leg, tcpOpen, tcpClose, tcpRefused, tlsHandshake, tlsRejected, insideTls, certificateFor, certProblem, byteLength, newConversation, runConversations } from '../exchange'
-import { findPath } from '../network'
+import { routeBetween } from '../routing'
 import { connectTo, isFailure, serviceUp, refuse, play, portOf, c2s, s2c, type Target } from './common'
 import { isListening, type ServiceId } from '../services'
 
@@ -43,11 +43,11 @@ function patchMailbox(server: NetNode, address: string, change: (b: Mailbox) => 
 }
 
 /** Find the client's mail server: `mail.<domain of address>` via DNS (no MX records in Networx). */
-function mailServer(cmd: string, address: string, ctx: TermContext): Target | { lines: Lines } {
+function mailServer(cmd: string, address: string, port: number, ctx: TermContext): Target | { lines: Lines } {
   const host = `mail.${domainOf(address)}`
-  return connectTo(host, ctx, {
+  return connectTo(host, port, ctx, {
     unresolved: [err(`${cmd}: ${host}: Name or service not known`)],
-    noRoute: [err(`${cmd}: connect to ${host}: No route to host`)],
+    noRoute: (why) => [err(`${cmd}: connect to ${host}: ${why}`)],
   })
 }
 
@@ -168,10 +168,10 @@ export function cmdPop3(args: string[], ctx: TermContext): Lines {
   const tls = args.includes('--tls')
   if (!isAddress(address)) return [err('Usage: pop3 <address> [--keep] [--tls]   e.g. pop3 dr.nguyen@careconnect.example')]
 
-  const t = mailServer('pop3', address, ctx)
-  if (isFailure(t)) return t.lines
   const service: ServiceId = tls ? 'pop3s' : 'pop3'
   const port = portOf(service)
+  const t = mailServer('pop3', address, port, ctx)
+  if (isFailure(t)) return t.lines
   const intro = tls
     ? info(`ⓘ POP3 over TLS on port ${port} (TCP). After the TLS handshake, the password and the mail are encrypted.`)
     : info(`ⓘ POP3 on port ${port} (TCP). Username and password are sent in plain text.`)
@@ -304,10 +304,10 @@ export function cmdImap(args: string[], ctx: TermContext): Lines {
     return [err('Usage: imap <address> [read <n>] [--tls]   e.g. imap dr.nguyen@careconnect.example read 1')]
   }
 
-  const t = mailServer('imap', address, ctx)
-  if (isFailure(t)) return t.lines
   const service: ServiceId = tls ? 'imaps' : 'imap'
   const port = portOf(service)
+  const t = mailServer('imap', address, port, ctx)
+  if (isFailure(t)) return t.lines
   const intro = tls
     ? info(`ⓘ IMAP over TLS on port ${port} (TCP). After the TLS handshake, the password and the mail are encrypted.`)
     : info(`ⓘ IMAP on port ${port} (TCP). Username and password are sent in plain text.`)
@@ -477,12 +477,13 @@ function relayTarget(server: NetNode, domain: string, ctx: TermContext): RelayTa
   const host = `mail.${domain}`
   const local = ctx.nodes.find((n) => n.id !== server.id && n.data.deviceType === 'mail' && n.data.mailDomain?.toLowerCase() === domain)
   if (local) {
-    const path = findPath(server.id, local.id, ctx.nodes, ctx.edges)
-    return path ? { node: local, ip: local.data.ip, host, path } : null
+    const route = routeBetween(server, local, local.data.ip, ctx.nodes, ctx.edges)
+    return route.ok ? { node: local, ip: local.data.ip, host, path: route.path } : null
   }
   for (const cloud of ctx.nodes.filter((n) => n.data.deviceType === 'cloud' && n.data.isOn)) {
-    const path = findPath(server.id, cloud.id, ctx.nodes, ctx.edges)
-    if (path) return { node: cloud, ip: internetMailIp(domain), host, path }
+    const ip = internetMailIp(domain)
+    const route = routeBetween(server, cloud, ip, ctx.nodes, ctx.edges)
+    if (route.ok) return { node: cloud, ip, host, path: route.path }
   }
   return null
 }
@@ -498,10 +499,10 @@ export function cmdSmtp(args: string[], ctx: TermContext): Lines {
     return [err('Usage: smtp <from> <to> "<subject>" [--tls]'), err('  e.g. smtp reception@careconnect.example dr.nguyen@careconnect.example "Patient arrived"')]
   }
 
-  const t = mailServer('smtp', from, ctx)
-  if (isFailure(t)) return t.lines
   const service: ServiceId = tls ? 'smtps' : 'submission'
   const port = portOf(service)
+  const t = mailServer('smtp', from, port, ctx)
+  if (isFailure(t)) return t.lines
   const intro = tls
     ? info(`ⓘ SMTP over TLS on port ${port} (TCP): sending, encrypted from the start.`)
     : info(`ⓘ SMTP submission on port ${port} (TCP): your device sends mail to its own mail server.`)

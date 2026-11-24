@@ -1,8 +1,10 @@
 import type { TerminalLine, PacketAnim, PendingCapture } from '../types'
-import { findPath, nodeById, nodeByIp, simulatePingRtt, subnetToCidr } from './network'
+import { nodeById, simulatePingRtt, subnetToCidr } from './network'
 import { type TermContext, type Lines, out, err, info, self, delayLines } from './context'
 import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
-import { resolveTarget, isResolveError, isIp, dnsServerFor, type Resolution } from './resolve'
+import { resolveTarget, isResolveError, isIp, dnsServerFor, routeTo, nodeForIp, dnsUnreachableExplain, type Resolution } from './resolve'
+import { errnoText, findSegmentPath, type Route } from './routing'
+import { playUnreachable } from './unreachable'
 import { tokenize } from './tokenize'
 import { dnsConversation, runConversations, hostKeyFingerprint, newConversation, tcpOpen, tcpRefused } from './exchange'
 import { cmdCurl } from './protocols/web'
@@ -22,6 +24,11 @@ export { PUBLIC_IPS } from './resolve'
 function animateDns(r: Resolution, ctx: TermContext): number {
   const dnsLeg = dnsConversation(r, ctx)
   return dnsLeg ? runConversations([dnsLeg], ctx).endMs : 0
+}
+
+/** The error line for a name that didn't resolve, and why when the address rules are the reason. */
+function resolveErrorLines(cmd: string, r: Resolution & { error: string; explain?: string }, at: number): Lines {
+  return [err(resolveErrorText(cmd, r), at), ...(r.explain ? [info(r.explain, at)] : [])]
 }
 
 /** The terminal error for a name that didn't resolve. */
@@ -52,12 +59,13 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
   const afterDns = animateDns(r, ctx)
   const lines: Lines = r.dnsServerIp ? [info(`Resolving ${target} via DNS (${r.dnsServerIp})…`)] : []
 
-  if (isResolveError(r)) return [...lines, err(resolveErrorText('ping', r), afterDns)]
-  const dst = r.node
-  const path = dst ? findPath(src.id, dst.id, ctx.nodes, ctx.edges) : null
-  if (!dst || !path) return [...lines, err('ping: sendmsg: No route to host', afterDns)]
-
+  if (isResolveError(r)) return [...lines, ...resolveErrorLines('ping', r, afterDns)]
   const header = isIp(target) ? `PING ${target}: 56 data bytes` : `PING ${target} (${r.ip}): 56 data bytes`
+  const dst = r.node
+  const route = routeTo(dst, r.ip, ctx)
+  if (!route.ok) return [...lines, ...pingFailure(route, target, r.ip, header, src.data.ip, ctx, afterDns)]
+  if (!dst) return [...lines, err('ping: sendmsg: No route to host', afterDns)]
+  const path = route.path
   if (!dst.data.isOn) {
     return [...lines, out(header, afterDns), err('Request timeout for icmp_seq 0', afterDns)]
   }
@@ -104,6 +112,43 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
   return [...lines, ...delayLines(body, afterDns)]
 }
 
+/** What ping prints when the address rules stop it, with the packets that do go out. */
+function pingFailure(route: Extract<Route, { ok: false }>, target: string, ip: string, header: string, srcIp: string, ctx: TermContext, startMs: number): Lines {
+  const stats = (sent: number) => [out(''), out(`--- ${target} ping statistics ---`), out(`${sent} packets transmitted, 0 packets received, 100.0% packet loss`)]
+  const explain = route.explain ? [info(route.explain)] : []
+  let body: Lines
+  switch (route.failure) {
+    case 'no-address':
+    case 'net-unreachable':
+      body = [err('ping: sendto: Network is unreachable'), ...explain]
+      break
+    case 'host-unreachable':
+      // ARP for the next hop got no answer
+      body = [out(header), ...[0, 1, 2].map((i) => err(`From ${srcIp} icmp_seq=${i} Destination Host Unreachable`)), ...stats(3), ...explain]
+      break
+    case 'private':
+    case 'no-reply':
+      body = [out(header), ...[0, 1, 2, 3].map((i) => out(`Request timeout for icmp_seq ${i}`)), ...stats(4), ...explain]
+      break
+    default:
+      body = [err('ping: sendmsg: No route to host'), ...explain]
+  }
+  return playUnreachable(route, { kind: 'icmp' }, ip, ctx, body, startMs).lines
+}
+
+/** One traceroute line per device after the first on `path`, numbered from `first`. */
+function tracerouteHops(path: string[], ctx: TermContext, first = 1): Lines {
+  const WAN_SIDE_TYPES = ['router', 'gateway', 'cloud', 'firewall']
+  return path.slice(1).map((nodeId, i) => {
+    const node = nodeById(nodeId, ctx.nodes)
+    const prevNode = nodeById(path[i]!, ctx.nodes)
+    const fromWan = WAN_SIDE_TYPES.includes(prevNode?.data.deviceType ?? '')
+    const ip = (fromWan && node?.data.wanIp) ? node.data.wanIp : (node?.data.ip || node?.data.label || '*')
+    const rtt = simulatePingRtt(i + 1)
+    return out(` ${first + i}  ${ip} (${node?.data.label ?? ''})  ${rtt} ms  ${rtt + 1} ms  ${rtt} ms`)
+  })
+}
+
 function cmdTraceroute(args: string[], ctx: TermContext): Lines {
   const target = args[0]
   if (!target) return [err('Usage: traceroute <ip or hostname>')]
@@ -113,25 +158,36 @@ function cmdTraceroute(args: string[], ctx: TermContext): Lines {
   const afterDns = animateDns(r, ctx)
   const lines: Lines = r.dnsServerIp ? [info(`Resolving ${target} via DNS (${r.dnsServerIp})…`)] : []
 
-  if (isResolveError(r)) return [...lines, err(resolveErrorText('traceroute', r), afterDns)]
+  if (isResolveError(r)) return [...lines, ...resolveErrorLines('traceroute', r, afterDns)]
   const dst = r.node
-  const path = dst ? findPath(src.id, dst.id, ctx.nodes, ctx.edges) : null
-  if (!dst || !path) return [...lines, err(`traceroute to ${target}: no route to host`, afterDns)]
+  const header = out(`traceroute to ${target} (${r.ip}), 30 hops max, 60 byte packets`)
+  const route = routeTo(dst, r.ip, ctx)
+  if (!route.ok) {
+    const explain = route.explain ? [info(route.explain)] : []
+    const silent = (from: number) => [0, 1, 2].map((i) => out(` ${from + i}  * * *`))
+    let body: Lines
+    if (route.failure === 'no-address' || route.failure === 'net-unreachable') {
+      body = [err('traceroute: sendto: Network is unreachable'), ...explain]
+    } else if ((route.failure === 'private' || route.failure === 'no-reply') && route.reach) {
+      // The devices on the way still answer; after that, silence
+      const answered = route.failure === 'no-reply' ? route.reach.slice(0, -1) : route.reach
+      const cloudAt = answered.findIndex((id) => nodeById(id, ctx.nodes)?.data.deviceType === 'cloud')
+      const hops = cloudAt > 0
+        ? [...tracerouteHops(answered.slice(0, cloudAt), ctx), out(` ${cloudAt}  ${INTERNET_HOPS[0]!.ip} (${INTERNET_HOPS[0]!.label})  ${12 + cloudAt * 3} ms  ${13 + cloudAt * 3} ms  ${12 + cloudAt * 3} ms`)]
+        : tracerouteHops(answered, ctx)
+      body = [header, ...hops, ...silent(hops.length + 1), ...explain]
+    } else {
+      body = [header, ...silent(1), ...explain]
+    }
+    return [...lines, ...playUnreachable(route, { kind: 'icmp' }, r.ip, ctx, body, afterDns).lines]
+  }
+  if (!dst) return [...lines, err(`traceroute to ${target}: no route to host`, afterDns)]
+  const path = route.path
 
   ctx.dispatchPackets?.(startAfter(makePacketsWithArp(src, dst, path, ctx, 'ICMP', 'ICMP'), afterDns))
 
-  const body: Lines = [out(`traceroute to ${target} (${r.ip}), 30 hops max, 60 byte packets`)]
-  const WAN_SIDE_TYPES = ['router', 'gateway', 'cloud', 'firewall']
-  let hopNum = 1
-  path.slice(1).forEach((nodeId, i) => {
-    const node = nodeById(nodeId, ctx.nodes)
-    const prevNode = nodeById(path[i]!, ctx.nodes)
-    const fromWan = WAN_SIDE_TYPES.includes(prevNode?.data.deviceType ?? '')
-    const ip = (fromWan && node?.data.wanIp) ? node.data.wanIp : (node?.data.ip || node?.data.label || '*')
-    const rtt = simulatePingRtt(i + 1)
-    body.push(out(` ${hopNum}  ${ip} (${node?.data.label ?? ''})  ${rtt} ms  ${rtt + 1} ms  ${rtt} ms`))
-    hopNum++
-  })
+  const body: Lines = [header, ...tracerouteHops(path, ctx)]
+  let hopNum = path.length
 
   if (dst.data.deviceType === 'cloud') {
     // Simulated internet backbone hops, then the host itself
@@ -207,7 +263,7 @@ function cmdNslookup(args: string[], ctx: TermContext): Lines {
   if (isIp(domain)) {
     // Reverse lookup needs PTR records, which Networx's DNS server doesn't hold
     const server = dnsServerFor(ctx)
-    if (!server) return [out('Server:   (none)'), out(''), err(';; connection timed out; no servers could be reached')]
+    if (!server) return [out('Server:   (none)'), out(''), err(';; connection timed out; no servers could be reached'), ...(dnsUnreachableExplain(ctx) ? [info(dnsUnreachableExplain(ctx)!)] : [])]
     const arpa = `${domain.split('.').reverse().join('.')}.in-addr.arpa`
     return [
       out(`Server:   ${server.ip}`),
@@ -221,7 +277,7 @@ function cmdNslookup(args: string[], ctx: TermContext): Lines {
   const afterDns = animateDns(r, ctx)
 
   if (!r.dnsServerIp) {
-    return [out('Server:   (none)'), out(''), err(';; connection timed out; no servers could be reached')]
+    return [out('Server:   (none)'), out(''), err(';; connection timed out; no servers could be reached'), ...(dnsUnreachableExplain(ctx) ? [info(dnsUnreachableExplain(ctx)!)] : [])]
   }
 
   const lines: Lines = [
@@ -284,11 +340,15 @@ function cmdRoute(_args: string[], ctx: TermContext): Lines {
 function cmdSsh(args: string[], ctx: TermContext): Lines {
   const target = args[0]
   if (!target) return [err('Usage: ssh <ip-address>')]
-  const dst = nodeByIp(target, ctx.nodes)
-  if (!dst) return [err(`ssh: connect to host ${target}: No route to host`)]
+  const dst = nodeForIp(target, ctx)
   const src = self(ctx)
-  const path = findPath(src.id, dst.id, ctx.nodes, ctx.edges)
-  if (!path) return [err(`ssh: connect to host ${target}: Network unreachable`)]
+  const route = routeTo(dst, target, ctx)
+  if (!route.ok) {
+    const lines = [err(`ssh: connect to host ${target} port 22: ${errnoText(route.failure)}`), ...(route.explain ? [info(route.explain)] : [])]
+    return playUnreachable(route, { kind: 'tcp', port: 22 }, target, ctx, lines).lines
+  }
+  if (!dst || dst.data.deviceType === 'cloud') return [err(`ssh: connect to host ${target} port 22: No route to host`)]
+  const path = route.path
   // Servers run SSH as a service (Services tab); clients and routers accept it as before
   const sshAsService = servicesFor(dst.data.deviceType).some((s) => s.id === 'ssh')
   const accepts = sshAsService
@@ -332,7 +392,8 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
   )
 
   for (const router of dhcpRouters) {
-    const path = findPath(src.id, router.id, ctx.nodes, ctx.edges)
+    // DISCOVER is a broadcast: only a DHCP server on the same network segment hears it
+    const path = findSegmentPath(src.id, router.id, ctx.nodes, ctx.edges)
     if (!path) continue
 
     // Parse pool range (last-octet format "100-200")

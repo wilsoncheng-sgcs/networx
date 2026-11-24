@@ -103,9 +103,9 @@ export function cmdFtp(args: string[], ctx: TermContext): Lines {
   const action = parseFileAction(args.slice(1))
   if (!host || !action) return [err('Usage: ftp <host> [ls | get <file>]   e.g. ftp files.careconnect.example get referrals.csv')]
 
-  const t = connectTo(host, ctx, {
+  const t = connectTo(host, portOf('ftp'), ctx, {
     unresolved: [err(`ftp: ${host}: Name or service not known`)],
-    noRoute: [err(`ftp: connect: No route to host`)],
+    noRoute: (why) => [err(`ftp: connect: ${why}`)],
   })
   if (isFailure(t)) return t.lines
 
@@ -232,9 +232,9 @@ export function cmdSftp(args: string[], ctx: TermContext): Lines {
   const action = parseFileAction(args.slice(1))
   if (!host || !action) return [err('Usage: sftp <host> [ls | get <file>]   e.g. sftp files.careconnect.example get referrals.csv')]
 
-  const t = connectTo(host, ctx, {
+  const t = connectTo(host, portOf('ssh'), ctx, {
     unresolved: [err(`ssh: Could not resolve hostname ${host}: Name or service not known`), out('Connection closed')],
-    noRoute: [err(`ssh: connect to host ${host} port 22: No route to host`), out('Connection closed')],
+    noRoute: (why) => [err(`ssh: connect to host ${host} port 22: ${why}`), out('Connection closed')],
   })
   if (isFailure(t)) return t.lines
 
