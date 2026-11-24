@@ -3,6 +3,7 @@ import type { NetNode } from '../../types'
 import { run, careConnect } from './helpers'
 import { PRESETS } from '../presets'
 import { normaliseNetwork } from '../defaults'
+import { clearAllDnsCaches } from '../dnsCache'
 
 type Net = ReturnType<typeof careConnect>
 const set = (net: Net, id: string, patch: Partial<NetNode['data']>) => {
@@ -11,6 +12,7 @@ const set = (net: Net, id: string, patch: Partial<NetNode['data']>) => {
   return net
 }
 const presetNet = (id: string): Net => {
+  clearAllDnsCaches()
   const p = PRESETS.find((x) => x.id === id)!
   return { nodes: normaliseNetwork(structuredClone(p.nodes), p.edges), edges: structuredClone(p.edges) }
 }

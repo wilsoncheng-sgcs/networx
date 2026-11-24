@@ -6,6 +6,7 @@ import { tapView } from '../simulation/tap'
 import { setAnimSpeed, setStepping, scaledHop } from '../simulation/packets'
 import * as clock from '../simulation/clock'
 import { makeDefaultData, normaliseNetwork } from '../simulation/defaults'
+import { clearAllDnsCaches } from '../simulation/dnsCache'
 import type { Preset } from '../simulation/presets'
 
 const STORAGE_KEY = 'networx-state-v1'
@@ -394,6 +395,7 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
   },
 
   loadPreset: (preset) => {
+    clearAllDnsCaches()
     set({
       nodes: normaliseNetwork(preset.nodes, preset.edges),
       edges: preset.edges,

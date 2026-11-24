@@ -4,6 +4,7 @@ import { lookupName, isIp, resolveTarget, isResolveError, dnsServerIpOf, type Dn
 import { playLookup } from '../lookup'
 import { RECORD_TYPES, digLine, fqdn, rdata, messageSize, normName, type DnsAnswer, type AnswerRecord } from '../dns'
 import { nodeById } from '../network'
+import { cacheEntries, flushDnsCache } from '../dnsCache'
 
 /**
  * dig and nslookup (Phase 4 B3). Both ask this device's DNS server (or the one named with @) and
@@ -29,11 +30,12 @@ function parseType(s: string | undefined): DnsRecordType | null {
 }
 
 /** Plain-language notes after an answer: one per record type, the TTLs, and what the flags mean. */
-export function answerNotes(name: string, qtype: DnsRecordType, answer: DnsAnswer): string[] {
+export function answerNotes(name: string, qtype: DnsRecordType, answer: DnsAnswer, cached = false): string[] {
   const notes: string[] = []
-  if (answer.status === 'NXDOMAIN') return [`ⓘ NXDOMAIN: no such name — the DNS server has no records for ${normName(name)}.`]
+  const fromCache = 'ⓘ Answered from this device\'s cache — nothing was sent. It stays cached until the TTL runs out.'
+  if (answer.status === 'NXDOMAIN') return [`ⓘ NXDOMAIN: no such name — the DNS server has no records for ${normName(name)}.`, ...(cached ? [fromCache] : [])]
   if (answer.status === 'SERVFAIL') return ["ⓘ SERVFAIL: the server couldn't answer — the CNAME records go round in a loop, or the chain is too long."]
-  if (!answer.records.length) return [`ⓘ NOERROR but no answer: ${normName(name)} exists, but has no ${qtype} record.`]
+  if (!answer.records.length) return [`ⓘ NOERROR but no answer: ${normName(name)} exists, but has no ${qtype} record.`, ...(cached ? [fromCache] : [])]
   const first = (t: DnsRecordType) => answer.records.find((r) => r.type === t)
   // In the order the records appear (a CNAME, then what it points to)
   for (const t of [...new Set(answer.records.map((r) => r.type))]) {
@@ -53,7 +55,7 @@ export function answerNotes(name: string, qtype: DnsRecordType, answer: DnsAnswe
   notes.push(ttls.length === 1
     ? `ⓘ ${ttls[0]} is a TTL: how many seconds a resolver may keep this answer in its cache.`
     : `ⓘ ${ttls.slice(0, -1).join(', ')} and ${ttls[ttls.length - 1]} are TTLs: how many seconds a resolver may keep this answer in its cache.`)
-  notes.push(answer.authoritative
+  notes.push(cached ? fromCache : answer.authoritative
     ? 'ⓘ aa (authoritative answer): this server holds these records itself.'
     : 'ⓘ No aa flag: this server looked the answer up elsewhere for you, so it is not authoritative.')
   return notes
@@ -94,7 +96,8 @@ export function cmdDig(args: string[], ctx: TermContext): Lines {
     serverIp = s.ip
   }
   const banner = [out(`; <<>> DiG 9.10.6 <<>> ${args.join(' ')}`), out(';; global options: +cmd')]
-  const looked = lookupName(name, qtype, ctx, serverIp)
+  const looked = lookupName(name, qtype, ctx, { serverIp })
+  if (looked.kind === 'cached') return digAnswer(name, qtype, looked, { short, banner, ctx })
   if (looked.kind !== 'answer') {
     const fail = [err(';; connection timed out; no servers could be reached'), info(looked.explain)]
     if (looked.kind === 'no-dns') return [...(short ? [] : banner), ...fail]
@@ -103,27 +106,30 @@ export function cmdDig(args: string[], ctx: TermContext): Lines {
   return playLookup({ name, query: looked.query }, ctx, digAnswer(name, qtype, looked, { short, banner, ctx })).lines
 }
 
-function digAnswer(name: string, qtype: DnsRecordType, looked: Extract<DnsLookup, { kind: 'answer' }>, o: { short: boolean; banner: Lines; ctx: TermContext }): Lines {
-  const { answer, query } = looked
+function digAnswer(name: string, qtype: DnsRecordType, looked: Extract<DnsLookup, { kind: 'answer' | 'cached' }>, o: { short: boolean; banner: Lines; ctx: TermContext }): Lines {
+  const answer = looked.answer
+  const cached = looked.kind === 'cached'
+  const id = cached ? Math.floor(Math.random() * 0x10000) : parseInt(looked.query.id, 16)
+  const serverIp = cached ? looked.serverIp : looked.query.serverIp
   const records: AnswerRecord[] = answer.records
   if (o.short) return records.map((r) => out(rdata(r)))
   const flags = `qr${answer.authoritative ? ' aa' : ''} rd ra`
   return [
     ...o.banner,
     out(';; Got answer:'),
-    out(`;; ->>HEADER<<- opcode: QUERY, status: ${answer.status}, id: ${parseInt(query.id, 16)}`),
+    out(`;; ->>HEADER<<- opcode: QUERY, status: ${answer.status}, id: ${id}`),
     out(`;; flags: ${flags}; QUERY: 1, ANSWER: ${records.length}, AUTHORITY: 0, ADDITIONAL: 1`),
     out(''),
     out(';; QUESTION SECTION:'),
     out(`;${fqdn(name)}\t\tIN\t${qtype}`),
     out(''),
     ...(records.length ? [out(';; ANSWER SECTION:'), ...records.map((r) => out(digLine(r))), out('')] : []),
-    out(`;; Query time: ${queryTimeMs(query.path, o.ctx)} msec`),
-    out(`;; SERVER: ${query.serverIp}#53(${query.serverIp})`),
+    out(`;; Query time: ${cached ? 0 : queryTimeMs(looked.query.path, o.ctx)} msec`),
+    out(`;; SERVER: ${serverIp}#53(${serverIp})`),
     out(`;; WHEN: ${digWhen()}`),
     out(`;; MSG SIZE  rcvd: ${messageSize(name, records)}`),
     out(''),
-    ...answerNotes(name, qtype, answer).map((t) => info(t)),
+    ...answerNotes(name, qtype, answer, cached).map((t) => info(t)),
   ]
 }
 
@@ -156,7 +162,8 @@ export function cmdNslookup(args: string[], ctx: TermContext): Lines {
     return [out(`Server:   ${serverIp}`), out(`Address:  ${serverIp}#53`), out(''), out(`** server can't find ${arpa}: NXDOMAIN`)]
   }
 
-  const looked = lookupName(domain, qtype, ctx)
+  const looked = lookupName(domain, qtype, ctx, { useCache: false })
+  if (looked.kind === 'cached') return []
   if (looked.kind === 'no-dns') return [out('Server:   (none)'), out(''), ...timedOut(looked.explain)]
   if (looked.kind === 'timeout') return playLookup({ name: domain, timeout: looked.timeout }, ctx, timedOut(looked.explain)).lines
 
@@ -173,3 +180,30 @@ export function cmdNslookup(args: string[], ctx: TermContext): Lines {
   return delayLines(lines, end)
 }
 
+
+// ── The device's DNS cache ──────────────────────────────────────────────────
+
+export function cmdDnsCache(ctx: TermContext): Lines {
+  const me = nodeById(ctx.selfId, ctx.nodes)
+  const entries = cacheEntries(ctx.selfId)
+  if (!entries.length) return [out(`The DNS cache on ${me?.data.label ?? 'this device'} is empty.`)]
+  const lines: Lines = [
+    out(`DNS cache on ${me?.data.label ?? 'this device'}:`),
+    out(`${'Name'.padEnd(30)}${'Type'.padEnd(7)}${'TTL left'.padEnd(10)}Answer`),
+  ]
+  for (const e of entries) {
+    const shown = e.answer.status !== 'NOERROR' ? e.answer.status
+      : e.answer.records.length ? e.answer.records.map((r) => (r.type === e.qtype ? rdata(r) : `${rdata(r)} (${r.type})`)).join(', ')
+      : 'no record of this type'
+    lines.push(out(`${e.name.padEnd(30)}${e.qtype.padEnd(7)}${`${e.remaining} s`.padEnd(10)}${shown}`))
+  }
+  lines.push(info('ⓘ Each answer is kept until its TTL runs out, then the device asks its DNS server again. flushdns empties the cache.'))
+  return lines
+}
+
+export function cmdFlushDns(ctx: TermContext, quiet = false): Lines {
+  flushDnsCache(ctx.selfId)
+  if (quiet) return []
+  const me = nodeById(ctx.selfId, ctx.nodes)
+  return [info(`Flushed the DNS cache on ${me?.data.label ?? 'this device'}. The next lookup asks the DNS server again.`)]
+}

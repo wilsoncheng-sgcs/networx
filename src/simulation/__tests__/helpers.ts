@@ -2,10 +2,12 @@ import type { NodeData, PendingCapture, NetNode, TerminalLine } from '../../type
 import type { TermContext } from '../context'
 import { PRESETS } from '../presets'
 import { normaliseNetwork } from '../defaults'
+import { clearAllDnsCaches } from '../dnsCache'
 import { runCommand } from '../terminal'
 
 /** A fresh copy of the CareConnect preset, normalised as the app loads it. */
 export function careConnect() {
+  clearAllDnsCaches()   // a fresh network: no device has cached anything
   const preset = PRESETS.find((p) => p.id === 'careconnect')!
   return {
     nodes: normaliseNetwork(structuredClone(preset.nodes), preset.edges) as NetNode[],

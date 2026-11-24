@@ -161,6 +161,7 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
   const legs: Leg[] = []
   const resolvedLines: Lines = isResolveError(r) ? [] : [
     ...(r.dnsServerIp ? v(info(`ⓘ DNS: asked ${r.dnsServerIp} on port 53 (UDP): ${host} → ${r.ip}`)) : []),
+    ...(r.cached ? v(info(`ⓘ DNS: ${host} → ${r.ip} from this device's DNS cache (nothing sent)`)) : []),
     ...(isIp(host) ? [] : v(out(`* Host ${host}:${port} was resolved.`))),
     ...(isIp(host) ? [] : v(out(`* IPv4: ${r.ip}`))),
     ...v(out(`*   Trying ${r.ip}:${port}...`)),

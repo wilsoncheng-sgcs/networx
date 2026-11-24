@@ -4,6 +4,7 @@ import { nodeById } from './network'
 import { routeBetween, nodeHasIp, type Route, type Flow } from './routing'
 import { isListening } from './services'
 import { isPrivateIp } from './privateIp'
+import { cacheGet, cachePut } from './dnsCache'
 import { answerQuery, addressOf, normName, newTransactionId, PUBLIC_TTL, type AnswerRecord, type DnsAnswer } from './dns'
 
 /** Well-known internet names, answered (non-authoritatively) when the local DNS server has no record. */
@@ -66,6 +67,8 @@ export interface Resolved {
   authoritative: boolean
   /** The query to animate (absent when no DNS server was asked). */
   query?: DnsQuery
+  /** Answered from this device's DNS cache: nothing was sent. */
+  cached?: boolean
 }
 
 export interface ResolveError {
@@ -82,6 +85,7 @@ export interface ResolveError {
   explain?: string
   query?: DnsQuery
   timeout?: DnsTimeout
+  cached?: boolean
 }
 
 export type Resolution = Resolved | ResolveError
@@ -243,18 +247,33 @@ export function serverAnswer(server: NetNode, name: string, qtype: DnsRecordType
 /** The result of asking this device's DNS server one question. */
 export type DnsLookup =
   | { kind: 'answer'; answer: DnsAnswer; query: DnsQuery }
+  /** From this device's cache: nothing sent; TTLs counted down; `remaining` seconds until it expires. */
+  | { kind: 'cached'; answer: DnsAnswer; serverIp: string; remaining: number }
   | { kind: 'timeout'; timeout: DnsTimeout; explain: string }
   | { kind: 'no-dns'; explain: string }
 
-/** Ask this device's DNS server (or `serverIp`) for `qtype` records of `name`. */
-export function lookupName(name: string, qtype: DnsRecordType, ctx: TermContext, serverIp?: string): DnsLookup {
-  const asked = askDnsServer(ctx, qtype, serverIp)
+export interface LookupOptions {
+  /** Ask this server instead of the device's own (dig @server). Bypasses the cache. */
+  serverIp?: string
+  /** Use and fill this device's DNS cache (default true). nslookup asks the server every time. */
+  useCache?: boolean
+}
+
+/** Ask this device's DNS server (or `opts.serverIp`) for `qtype` records of `name` — or its cache. */
+export function lookupName(name: string, qtype: DnsRecordType, ctx: TermContext, opts: LookupOptions = {}): DnsLookup {
+  const useCache = opts.useCache !== false && !opts.serverIp
+  if (useCache) {
+    const hit = cacheGet(ctx.selfId, name, qtype)
+    if (hit) return { kind: 'cached', answer: hit.answer, serverIp: hit.serverIp, remaining: hit.remaining }
+  }
+  const asked = askDnsServer(ctx, qtype, opts.serverIp)
   if (!asked) {
     const me = nodeById(ctx.selfId, ctx.nodes)
     return { kind: 'no-dns', explain: `ⓘ ${me?.data.label ?? 'This device'} has no DNS server to ask, so names can't be turned into IP addresses. Connecting by IP address still works.` }
   }
   if (!asked.ok) return { kind: 'timeout', timeout: asked.timeout, explain: asked.explain }
   const answer = serverAnswer(asked.server, name, qtype, ctx)
+  if (useCache) cachePut(ctx.selfId, name, qtype, answer, asked.serverIp)
   return { kind: 'answer', answer, query: { server: asked.server, serverIp: asked.serverIp, path: asked.path, qtype, answer, id: newTransactionId() } }
 }
 
@@ -276,15 +295,19 @@ export function resolveTarget(nameOrIp: string, ctx: TermContext): Resolution {
   if (looked.kind === 'timeout') {
     return { name, error: 'timeout', dnsServerNode: looked.timeout.server, dnsServerIp: looked.timeout.serverIp, explain: looked.explain, timeout: looked.timeout }
   }
-  const { answer, query } = looked
-  const asked = { name, dnsServerNode: query.server, dnsServerIp: query.serverIp, query }
+  const answer = looked.answer
+  const query = looked.kind === 'answer' ? looked.query : undefined
+  const asked = query
+    ? { name, dnsServerNode: query.server, dnsServerIp: query.serverIp, query }
+    : { name, dnsServerNode: null, dnsServerIp: null, cached: true }
   if (answer.status === 'NXDOMAIN') return { ...asked, error: 'nxdomain' }
   if (answer.status === 'SERVFAIL') {
     return { ...asked, error: 'servfail', explain: `ⓘ The DNS server couldn't answer for ${name} (SERVFAIL): its CNAME records go round in a loop, or the chain is too long.` }
   }
   const ip = addressOf(answer)
   if (!ip) {
-    const v6 = serverAnswer(query.server, name, 'AAAA', ctx).records.some((r) => r.type === 'AAAA')
+    const server = query?.server ?? (looked.kind === 'cached' ? dnsServerAt(looked.serverIp, ctx) : null)
+    const v6 = !!server && serverAnswer(server, name, 'AAAA', ctx).records.some((r) => r.type === 'AAAA')
     return v6
       ? { ...asked, error: 'no-ipv4', explain: 'ⓘ This name only has an IPv6 address (AAAA record); Networx connects over IPv4 only.' }
       : { ...asked, error: 'nodata', explain: `ⓘ ${name} exists, but has no A record, so there is no IPv4 address to connect to.` }

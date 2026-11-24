@@ -12,7 +12,7 @@ import { cmdCurl } from './protocols/web'
 import { cmdFtp, cmdSftp, sshHandshake, sshEncrypted } from './protocols/files'
 import { cmdPop3, cmdImap, cmdSmtp, cmdMail } from './protocols/mail'
 import { cmdSs, cmdNetstat } from './protocols/ports'
-import { cmdDig, cmdNslookup } from './protocols/dnsTools'
+import { cmdDig, cmdNslookup, cmdDnsCache, cmdFlushDns } from './protocols/dnsTools'
 import { isListening, servicesFor } from './services'
 
 export type { TermContext } from './context'
@@ -55,7 +55,7 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
   const r = resolveTarget(target, ctx)
   // The client can't address a packet it hasn't resolved yet: ICMP waits for the DNS answer
   const afterDns = animateDns(r, ctx)
-  const lines: Lines = r.dnsServerIp ? [info(`Resolving ${target} via DNS (${r.dnsServerIp})…`)] : []
+  const lines: Lines = r.dnsServerIp ? [info(`Resolving ${target} via DNS (${r.dnsServerIp})…`)] : r.cached ? [info(`Resolving ${target} from this device's DNS cache (nothing sent)…`)] : []
 
   if (isResolveError(r)) return [...lines, ...resolveErrorLines('ping', r, afterDns)]
   const header = isIp(target) ? `PING ${target}: 56 data bytes` : `PING ${target} (${r.ip}): 56 data bytes`
@@ -180,7 +180,7 @@ function cmdTraceroute(args: string[], ctx: TermContext): Lines {
   const src = self(ctx)
   const r = resolveTarget(target, ctx)
   const afterDns = animateDns(r, ctx)
-  const lines: Lines = r.dnsServerIp ? [info(`Resolving ${target} via DNS (${r.dnsServerIp})…`)] : []
+  const lines: Lines = r.dnsServerIp ? [info(`Resolving ${target} via DNS (${r.dnsServerIp})…`)] : r.cached ? [info(`Resolving ${target} from this device's DNS cache (nothing sent)…`)] : []
 
   if (isResolveError(r)) return [...lines, ...resolveErrorLines('traceroute', r, afterDns)]
   const dst = r.node
@@ -216,6 +216,9 @@ function cmdTraceroute(args: string[], ctx: TermContext): Lines {
 
 function cmdIpconfig(args: string[], ctx: TermContext): Lines {
   if (args[0] === '/renew') return cmdDhclient([], ctx)
+  // Windows: ipconfig /displaydns and /flushdns work on the DNS cache
+  if (args[0]?.toLowerCase() === '/displaydns') return cmdDnsCache(ctx)
+  if (args[0]?.toLowerCase() === '/flushdns') return [...cmdFlushDns(ctx, true), out('Successfully flushed the DNS Resolver Cache.')]
   const node = self(ctx)
   const { ip, wanIp, subnet, gateway, mac } = node.data
   const cidr = subnet ? subnetToCidr(subnet) : 24
@@ -489,6 +492,7 @@ function cmdHelp(): Lines {
     out('  nslookup [-type=mx] <name>     Ask the DNS server for an address (or other records)'),
     out('  dig [@server] <name> [type]    Ask the DNS server, showing the whole answer'),
     out('       types: A AAAA CNAME MX NS TXT    +short  values only'),
+    out('  dnscache / flushdns            Show / empty this device\'s DNS cache'),
     out('Web'),
     out('  curl [-v] http(s)://<host>     Fetch a page (-v shows every step)'),
     out('       -I  headers only     -k  carry on past a bad certificate'),
@@ -528,6 +532,12 @@ export function runCommand(raw: string, baseCtx: TermContext): TerminalLine[] {
     case 'ifconfig': return cmdIfconfig(args, ctx)
     case 'nslookup': return cmdNslookup(args, ctx)
     case 'dig': return cmdDig(args, ctx)
+    case 'dnscache': return cmdDnsCache(ctx)
+    case 'flushdns': return cmdFlushDns(ctx)
+    case 'sudo':
+      // macOS: sudo dscacheutil -flushcache empties the DNS cache and prints nothing
+      if (args[0]?.toLowerCase() === 'dscacheutil' && args[1] === '-flushcache') return cmdFlushDns(ctx, true)
+      return args.length ? runCommand(args.join(' '), baseCtx) : [err('usage: sudo <command>')]
     case 'arp': return cmdArp(args, ctx)
     case 'netstat': return cmdNetstat(args, ctx)
     case 'ss': return cmdSs(args, ctx)
