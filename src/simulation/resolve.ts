@@ -1,8 +1,10 @@
-import type { NetNode, NetEdge } from '../types'
+import type { NetNode, NetEdge, DnsRecord, DnsRecordType } from '../types'
 import type { TermContext } from './context'
 import { nodeById } from './network'
 import { routeBetween, nodeHasIp, type Route, type Flow } from './routing'
 import { isListening } from './services'
+import { isPrivateIp } from './privateIp'
+import { answerQuery, addressOf, normName, newTransactionId, PUBLIC_TTL, type AnswerRecord, type DnsAnswer } from './dns'
 
 /** Well-known internet names, answered (non-authoritatively) when the local DNS server has no record. */
 export const PUBLIC_IPS: Record<string, string> = {
@@ -40,6 +42,11 @@ export interface DnsQuery {
   server: NetNode
   serverIp: string
   path: string[]
+  /** What was asked, and what came back. */
+  qtype: DnsRecordType
+  answer: DnsAnswer
+  /** Transaction id, e.g. 0x1a2b. */
+  id: string
 }
 
 /** A DNS server that never answered: how far the queries got, and why. */
@@ -62,8 +69,12 @@ export interface Resolved {
 
 export interface ResolveError {
   name: string
-  /** nxdomain: no such name · timeout: the DNS server didn't answer · no-dns: no DNS server set */
-  error: 'nxdomain' | 'no-dns' | 'no-route' | 'timeout'
+  /**
+   * nxdomain: no such name · timeout: the DNS server didn't answer · no-dns: no DNS server set ·
+   * servfail: the server couldn't answer (a CNAME loop) · nodata: the name has no A record ·
+   * no-ipv4: the name only has an IPv6 (AAAA) address
+   */
+  error: 'nxdomain' | 'no-dns' | 'no-route' | 'timeout' | 'servfail' | 'nodata' | 'no-ipv4'
   dnsServerNode: NetNode | null
   dnsServerIp: string | null
   /** Why the name couldn't be looked up (an ⓘ line). */
@@ -164,7 +175,7 @@ function lastRouterIndex(path: string[], nodes: NetNode[]): number {
  * null when the device has no DNS server set.
  */
 function askDnsServer(ctx: TermContext):
-  | { ok: true; query: DnsQuery }
+  | { ok: true; server: NetNode; serverIp: string; path: string[] }
   | { ok: false; timeout: DnsTimeout; explain: string }
   | null {
   const src = nodeById(ctx.selfId, ctx.nodes)
@@ -192,23 +203,65 @@ function askDnsServer(ctx: TermContext):
     const reach = off ? route.path.slice(0, lastRouterIndex(route.path, ctx.nodes) + 1) : route.path
     return { ok: false, timeout: { serverIp, server, route: { ok: false, failure: 'no-reply', reach, explain: noAnswer } }, explain: noAnswer }
   }
-  return { ok: true, query: { server, serverIp, path: route.path } }
+  return { ok: true, server, serverIp, path: route.path }
 }
 
-/** What a DNS server answers for `name`: its own records (authoritative), else the well-known internet names. */
-function answerFrom(server: NetNode, name: string): { ip: string; authoritative: boolean } | null {
-  const record = server.data.deviceType === 'dns'
-    ? (server.data.dnsRecords ?? []).find((r) => r.hostname.toLowerCase() === name)
-    : undefined
-  if (record) return { ip: record.ip, authoritative: true }
+/** The records a server holds itself (it is authoritative for these). The internet's resolver holds none. */
+function zoneOf(server: NetNode): DnsRecord[] {
+  return server.data.deviceType === 'dns' ? server.data.dnsRecords ?? [] : []
+}
+
+/** The well-known internet names Networx knows, as A records. */
+function publicRecords(name: string): AnswerRecord[] {
   const ip = PUBLIC_IPS[name]
-  return ip ? { ip, authoritative: false } : null
+  return ip ? [{ name, type: 'A', value: ip, ttl: PUBLIC_TTL }] : []
 }
 
 /**
- * Resolve a name or IP the way every command does (spec §2.5, Phase 4 A1).
- * The device asks its DNS server; it never invents an address, and never quietly asks another
- * server: an unknown name is NXDOMAIN, a server that doesn't answer is a timeout.
+ * Records a server can look up for names it doesn't hold. A DNS server node knows the well-known
+ * internet names; the internet's resolver (8.8.8.8) also finds the records of DNS servers that are
+ * on the internet (public addresses), like a recursive resolver would.
+ */
+function lookupElsewhere(server: NetNode, ctx: TermContext): (name: string) => AnswerRecord[] {
+  if (server.data.deviceType !== 'cloud') return publicRecords
+  const internetZones = ctx.nodes.filter((n) => n.data.deviceType === 'dns' && n.data.isOn !== false && n.data.ip && !isPrivateIp(n.data.ip))
+  return (name) => {
+    for (const z of internetZones) {
+      const held = zoneOf(z).filter((r) => normName(r.name) === name)
+      if (held.length) return held.map((r) => ({ name, type: r.type, value: r.value.trim(), ttl: r.ttl, ...(r.type === 'MX' ? { priority: r.priority ?? 10 } : {}) }))
+    }
+    return publicRecords(name)
+  }
+}
+
+/** What a server answers for `name` and `qtype`. */
+export function serverAnswer(server: NetNode, name: string, qtype: DnsRecordType, ctx: TermContext): DnsAnswer {
+  return answerQuery(zoneOf(server), lookupElsewhere(server, ctx), name, qtype)
+}
+
+/** The result of asking this device's DNS server one question. */
+export type DnsLookup =
+  | { kind: 'answer'; answer: DnsAnswer; query: DnsQuery }
+  | { kind: 'timeout'; timeout: DnsTimeout; explain: string }
+  | { kind: 'no-dns'; explain: string }
+
+/** Ask this device's DNS server for `qtype` records of `name`. */
+export function lookupName(name: string, qtype: DnsRecordType, ctx: TermContext): DnsLookup {
+  const asked = askDnsServer(ctx)
+  if (!asked) {
+    const me = nodeById(ctx.selfId, ctx.nodes)
+    return { kind: 'no-dns', explain: `ⓘ ${me?.data.label ?? 'This device'} has no DNS server to ask, so names can't be turned into IP addresses. Connecting by IP address still works.` }
+  }
+  if (!asked.ok) return { kind: 'timeout', timeout: asked.timeout, explain: asked.explain }
+  const answer = serverAnswer(asked.server, name, qtype, ctx)
+  return { kind: 'answer', answer, query: { server: asked.server, serverIp: asked.serverIp, path: asked.path, qtype, answer, id: newTransactionId() } }
+}
+
+/**
+ * Resolve a name or IP the way every command does (spec §2.5, Phase 4 A1/B2).
+ * The device asks its DNS server for the name's A record (following CNAMEs); it never invents an
+ * address, and never quietly asks another server: an unknown name is NXDOMAIN, a server that doesn't
+ * answer is a timeout. Connections use IPv4 only.
  */
 export function resolveTarget(nameOrIp: string, ctx: TermContext): Resolution {
   const name = nameOrIp
@@ -217,22 +270,23 @@ export function resolveTarget(nameOrIp: string, ctx: TermContext): Resolution {
     return { name, ip: nameOrIp, node: nodeForIp(nameOrIp, ctx), dnsServerNode: null, dnsServerIp: null, authoritative: true }
   }
 
-  const asked = askDnsServer(ctx)
-  if (!asked) {
-    const me = nodeById(ctx.selfId, ctx.nodes)
-    return {
-      name, error: 'no-dns', dnsServerNode: null, dnsServerIp: null,
-      explain: `ⓘ ${me?.data.label ?? 'This device'} has no DNS server to ask, so names can't be turned into IP addresses. Connecting by IP address still works.`,
-    }
+  const looked = lookupName(nameOrIp, 'A', ctx)
+  if (looked.kind === 'no-dns') return { name, error: 'no-dns', dnsServerNode: null, dnsServerIp: null, explain: looked.explain }
+  if (looked.kind === 'timeout') {
+    return { name, error: 'timeout', dnsServerNode: looked.timeout.server, dnsServerIp: looked.timeout.serverIp, explain: looked.explain, timeout: looked.timeout }
   }
-  if (!asked.ok) {
-    return { name, error: 'timeout', dnsServerNode: asked.timeout.server, dnsServerIp: asked.timeout.serverIp, explain: asked.explain, timeout: asked.timeout }
+  const { answer, query } = looked
+  const asked = { name, dnsServerNode: query.server, dnsServerIp: query.serverIp, query }
+  if (answer.status === 'NXDOMAIN') return { ...asked, error: 'nxdomain' }
+  if (answer.status === 'SERVFAIL') {
+    return { ...asked, error: 'servfail', explain: `ⓘ The DNS server couldn't answer for ${name} (SERVFAIL): its CNAME records go round in a loop, or the chain is too long.` }
   }
-  const { query } = asked
-  const answer = answerFrom(query.server, nameOrIp.toLowerCase())
-  if (!answer) return { name, error: 'nxdomain', dnsServerNode: query.server, dnsServerIp: query.serverIp, query }
-  return {
-    name, ip: answer.ip, node: nodeForIp(answer.ip, ctx),
-    dnsServerNode: query.server, dnsServerIp: query.serverIp, authoritative: answer.authoritative, query,
+  const ip = addressOf(answer)
+  if (!ip) {
+    const v6 = serverAnswer(query.server, name, 'AAAA', ctx).records.some((r) => r.type === 'AAAA')
+    return v6
+      ? { ...asked, error: 'no-ipv4', explain: 'ⓘ This name only has an IPv6 address (AAAA record); Networx connects over IPv4 only.' }
+      : { ...asked, error: 'nodata', explain: `ⓘ ${name} exists, but has no A record, so there is no IPv4 address to connect to.` }
   }
+  return { ...asked, ip, node: nodeForIp(ip, ctx), authoritative: answer.authoritative }
 }

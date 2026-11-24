@@ -92,7 +92,7 @@ export default function Browser({ nodeId }: Props) {
           case 'no-dns':
             setError({ url: parsed.href, kind: 'unresolved', message: `${host} could not be resolved.\n\nThis device has no DNS server to ask.\n\nERR_NAME_NOT_RESOLVED` })
             break
-          case 'dns-timeout': {
+          case 'dns-failed': {
             const why = (result.explain ?? '').replace(/^ⓘ /, '')
             setError({ url: parsed.href, kind: 'unresolved', message: [`${host}'s server IP address could not be found.`, why, 'ERR_NAME_NOT_RESOLVED'].filter(Boolean).join('\n\n') })
             break

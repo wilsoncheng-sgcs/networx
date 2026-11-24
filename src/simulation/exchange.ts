@@ -2,7 +2,9 @@ import type { TerminalLine, PacketAnim, PendingCapture, AppProtocol, NetNode, Ce
 import type { TermContext } from './context'
 import { findPath, nodeById } from './network'
 import { arpBefore, firstHopMacs, leg, populateMacTables, scaledHop } from './packets'
-import { type Resolution, isResolveError } from './resolve'
+import type { DnsQuery } from './resolve'
+import type { DnsRecordType } from '../types'
+import { queryInfo, responseInfo, responsePayload, normName, newTransactionId, DEFAULT_TTL, type DnsAnswer } from './dns'
 
 /**
  * The conversation engine (spec §2). A command builds a Conversation — client, server,
@@ -98,20 +100,25 @@ export function tcpClose(serverFirst = false): Step[] {
   ]
 }
 
-/** A DNS query to port 53 (UDP) and its answer. `answerIp` null = NXDOMAIN. */
-export function dnsLookup(name: string, answerIp: string | null): Step[] {
+/** A DNS query to port 53 (UDP) and its answer: the response lists every record (a CNAME, then the A ...). */
+export function dnsSteps(id: string, name: string, qtype: DnsRecordType, answer: DnsAnswer): Step[] {
+  const label = answer.status === 'NXDOMAIN' ? 'NXDOMAIN' : answer.status === 'SERVFAIL' ? 'SERVFAIL' : 'DNS reply'
   return [
     { dir: 'c2s', transport: 'UDP', app: 'DNS', label: 'DNS query',
-      info: `Standard query A ${name}`,
-      payload: `Query: ${name}, type A, class IN` },
-    answerIp
-      ? { dir: 's2c', transport: 'UDP', app: 'DNS', label: 'DNS reply',
-          info: `Standard query response A ${name} A ${answerIp}`,
-          payload: `Answer: ${name}, type A, class IN, address ${answerIp}` }
-      : { dir: 's2c', transport: 'UDP', app: 'DNS', label: 'NXDOMAIN',
-          info: `Standard query response A ${name}, No such name`,
-          payload: `Reply code: No such name (NXDOMAIN) for ${name}` },
+      info: queryInfo(id, qtype, name),
+      payload: `Query: ${normName(name)}, type ${qtype}, class IN` },
+    { dir: 's2c', transport: 'UDP', app: 'DNS', label,
+      info: responseInfo(id, qtype, name, answer),
+      payload: responsePayload(qtype, name, answer) },
   ]
+}
+
+/** A query for an A record and its answer; `answerIp` null = NXDOMAIN. */
+export function dnsLookup(name: string, answerIp: string | null): Step[] {
+  const answer: DnsAnswer = answerIp
+    ? { status: 'NOERROR', records: [{ name, type: 'A', value: answerIp, ttl: DEFAULT_TTL }], authoritative: true }
+    : { status: 'NXDOMAIN', records: [], authoritative: true }
+  return dnsSteps(newTransactionId(), name, 'A', answer)
 }
 
 export interface CertInfo {
@@ -423,11 +430,12 @@ export function runConversations(
 }
 
 /** The DNS Conversation for a resolution — played whenever a DNS server answered, even for NXDOMAIN. */
-export function dnsConversation(r: Resolution, ctx: TermContext, lines?: TerminalLine[]): Leg | null {
-  if (!r.query) return null
-  const steps = dnsLookup(r.name, isResolveError(r) ? null : r.ip)
+export function dnsConversation(r: { name: string; query?: DnsQuery }, ctx: TermContext, lines?: TerminalLine[]): Leg | null {
+  const q = r.query
+  if (!q) return null
+  const steps = dnsSteps(q.id, r.name, q.qtype, q.answer)
   if (lines) steps[1]!.lines = lines
-  return { conv: newConversation(ctx.selfId, r.query.server.id, r.query.serverIp, 53, steps), path: r.query.path }
+  return { conv: newConversation(ctx.selfId, q.server.id, q.serverIp, 53, steps), path: q.path }
 }
 
 /** Path from this device to `server`, or null. */

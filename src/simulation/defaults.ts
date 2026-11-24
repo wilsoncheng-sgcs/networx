@@ -1,6 +1,7 @@
 import type { NodeData, DeviceType, NetNode, NetEdge, Mailbox, StoredFile } from '../types'
 import { defaultDnsServer, PUBLIC_RESOLVER_IP } from './resolve'
 import { HOST_TYPES } from './routing'
+import { normaliseRecord } from './dns'
 
 let ipCounter = 10
 
@@ -143,8 +144,8 @@ export function makeDefaultData(type: DeviceType, id: string): NodeData {
       base.ip = '192.168.1.53'
       base.label = 'DNS Server'
       base.dnsRecords = [
-        { id: 'dr1', hostname: 'www.school.local', ip: '192.168.1.80' },
-        { id: 'dr2', hostname: 'intranet.school.local', ip: '192.168.1.81' },
+        { id: 'dr1', name: 'www.school.local', type: 'A', value: '192.168.1.80', ttl: 3600 },
+        { id: 'dr2', name: 'intranet.school.local', type: 'A', value: '192.168.1.81', ttl: 3600 },
       ]
       break
     case 'web':
@@ -193,6 +194,8 @@ export function normaliseNode(node: NetNode): NetNode {
   for (const [key, value] of Object.entries(defaults)) {
     if (data[key] === undefined) data[key] = value
   }
+  // DNS records saved before Phase 4 were { hostname, ip }: they become A records
+  if (Array.isArray(data.dnsRecords)) data.dnsRecords = (data.dnsRecords as Parameters<typeof normaliseRecord>[0][]).map(normaliseRecord)
   return { ...node, data: data as NodeData }
 }
 

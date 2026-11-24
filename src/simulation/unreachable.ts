@@ -4,6 +4,8 @@ import { nodeById } from './network'
 import { HOP_MS, scaledHop, leg, firstHopMacs, nextBatchId } from './packets'
 import { CONV_HOP_MS, ephemeralPort } from './exchange'
 import type { Route } from './routing'
+import type { DnsRecordType } from '../types'
+import { queryInfo, newTransactionId } from './dns'
 
 type Failed = Extract<Route, { ok: false }>
 
@@ -11,7 +13,7 @@ export type Attempt =
   | { kind: 'tcp'; port: number }
   | { kind: 'icmp' }
   /** A DNS query (UDP 53): the resolver sends it three times, about 5 s apart, then gives up. */
-  | { kind: 'dns'; name: string }
+  | { kind: 'dns'; name: string; qtype?: DnsRecordType; id?: string }
 
 /** How long a resolver waits for a DNS answer before sending the query again (simulation clock, Normal speed). */
 export const DNS_RETRY_MS = 5000
@@ -67,6 +69,7 @@ export function playUnreachable(
     const macs = firstHopMacs(route.reach, ctx.nodes)
     const tries = attempt.kind === 'icmp' ? 4 : 3
     const clientPort = ephemeralPort()
+    const dnsId = attempt.kind === 'dns' ? attempt.id ?? newTransactionId() : ''
     // A resolver waits about 5 s for each answer; TCP and ping retry as soon as the last one has gone
     const gap = attempt.kind === 'dns' ? Math.max(scaledHop(DNS_RETRY_MS), legMs + hop) : legMs + Math.max(hop, 1)
     let t = startMs
@@ -79,7 +82,7 @@ export function playUnreachable(
         packets.push(...drop(leg(route.reach, ctx.edges, 'DNS', i ? 'DNS (again)' : 'DNS query', t, false, hop)))
         captures.push({
           ...base, srcPort: clientPort, dstPort: 53, transport: 'UDP', app: 'DNS', length: 20 + 8 + 17 + attempt.name.length,
-          info: `Standard query A ${attempt.name}`, payload: `Query: ${attempt.name}, type A, class IN`,
+          info: queryInfo(dnsId, attempt.qtype ?? 'A', attempt.name), payload: `Query: ${attempt.name}, type ${attempt.qtype ?? 'A'}, class IN`,
         })
       } else if (attempt.kind === 'tcp') {
         packets.push(...drop(leg(route.reach, ctx.edges, 'TCP', i ? 'SYN (again)' : 'SYN', t, false, hop)))

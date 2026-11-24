@@ -116,7 +116,7 @@ export function pageFor(server: NetNode, host: string, ip: string): string {
 
 // ── Fetching a URL (shared by curl and the browser) ─────────────────────────
 
-export type WebFailure = 'bad-url' | 'nxdomain' | 'no-dns' | 'dns-timeout' | 'no-route' | 'unreachable' | 'timeout' | 'refused' | 'cert'
+export type WebFailure = 'bad-url' | 'nxdomain' | 'no-dns' | 'dns-failed' | 'no-route' | 'unreachable' | 'timeout' | 'refused' | 'cert'
 
 export interface WebResult {
   ok: boolean
@@ -171,7 +171,7 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
       ? L(err(`curl: (7) Failed to connect to ${host} port ${port} after 0 ms: No route to host`))
       : [...L(err(`curl: (6) Could not resolve host: ${host}`)), ...(r.explain ? L(info(r.explain)) : [])]
     const run = playLookup(r, ctx, failLines)
-    const failure: WebFailure = r.error === 'timeout' ? 'dns-timeout' : r.error
+    const failure: WebFailure = r.error === 'nxdomain' || r.error === 'no-dns' ? r.error : 'dns-failed'
     return { ok: false, url, failure, explain: r.explain, lines: run.lines, endMs: run.endMs }
   }
 

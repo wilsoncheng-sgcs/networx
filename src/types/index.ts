@@ -38,10 +38,18 @@ export interface ArpEntry {
   iface: string
 }
 
+export type DnsRecordType = 'A' | 'AAAA' | 'CNAME' | 'MX' | 'NS' | 'TXT'
+
 export interface DnsRecord {
   id: string
-  hostname: string
-  ip: string
+  name: string
+  type: DnsRecordType
+  /** A: IPv4 address · AAAA: IPv6 address · CNAME/MX/NS: a host name · TXT: text */
+  value: string
+  /** Seconds a resolver may cache this record. */
+  ttl: number
+  /** MX only: lower is tried first. */
+  priority?: number
 }
 
 export interface FirewallRule {
