@@ -189,6 +189,12 @@ const careConnect: Preset = {
 }
 
 careConnect.edges = sideHandles(careConnect.nodes, careConnect.edges)
+// Every host asks CareConnect's DNS server, and both gateways hand it out by DHCP (Phase 4 B1)
+careConnect.nodes = careConnect.nodes.map((n) => {
+  if (['pc', 'laptop', 'server', 'dns', 'web', 'mail', 'file'].includes(n.data.deviceType)) return { ...n, data: { ...n.data, dnsServer: '203.0.113.53' } }
+  if (n.data.deviceType === 'gateway') return { ...n, data: { ...n.data, dhcpDns: '203.0.113.53' } }
+  return n
+})
 
 // ─── 1. Simple Star (LAN only) ───────────────────────────────────────────────
 

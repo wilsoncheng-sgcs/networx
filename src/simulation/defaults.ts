@@ -1,4 +1,6 @@
-import type { NodeData, DeviceType, NetNode, Mailbox, StoredFile } from '../types'
+import type { NodeData, DeviceType, NetNode, NetEdge, Mailbox, StoredFile } from '../types'
+import { defaultDnsServer, PUBLIC_RESOLVER_IP } from './resolve'
+import { HOST_TYPES } from './routing'
 
 let ipCounter = 10
 
@@ -192,4 +194,24 @@ export function normaliseNode(node: NetNode): NetNode {
     if (data[key] === undefined) data[key] = value
   }
   return { ...node, data: data as NodeData }
+}
+
+/**
+ * Normalise every node, then fill the settings that depend on the rest of the network:
+ * each host's DNS server (the network's DNS server node, else 8.8.8.8 when there is an Internet node,
+ * else none), and the DNS server a router or gateway hands out by DHCP.
+ */
+export function normaliseNetwork(nodes: NetNode[], edges: NetEdge[]): NetNode[] {
+  const all = nodes.map(normaliseNode)
+  const dnsNode = all.find((n) => n.data.deviceType === 'dns' && n.data.ip)
+  const forClients = dnsNode?.data.ip ?? (all.some((n) => n.data.deviceType === 'cloud') ? PUBLIC_RESOLVER_IP : '')
+  return all.map((n) => {
+    if (HOST_TYPES.includes(n.data.deviceType) && typeof n.data.dnsServer !== 'string') {
+      return { ...n, data: { ...n.data, dnsServer: defaultDnsServer(n, all, edges) } }
+    }
+    if ((n.data.deviceType === 'router' || n.data.deviceType === 'gateway') && typeof n.data.dhcpDns !== 'string') {
+      return { ...n, data: { ...n.data, dhcpDns: forClients } }
+    }
+    return n
+  })
 }

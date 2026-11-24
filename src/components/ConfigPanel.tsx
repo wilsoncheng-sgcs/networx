@@ -86,6 +86,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
   const isMail = data.deviceType === 'mail'
   const hasServices = ['web', 'dns', 'mail', 'file', 'server'].includes(data.deviceType)
   const hasIp = !(isSwitch || isHub)
+  const isHost = ['pc', 'laptop', 'server', 'dns', 'web', 'mail', 'file'].includes(data.deviceType)
 
   const TABS = [
     { id: 'basic',    label: 'Basic' },
@@ -156,6 +157,9 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
                 <Field label={(isRouter || isGateway) ? 'LAN IP — eth1 (network-facing)' : 'IP Address'} value={data.ip} onChange={(v) => upd({ ip: v })} placeholder="192.168.1.x" mono />
                 <Field label="Subnet Mask" value={data.subnet} onChange={(v) => upd({ subnet: v })} placeholder="255.255.255.0" mono />
                 <Field label="Default Gateway" value={data.gateway} onChange={(v) => upd({ gateway: v })} placeholder="192.168.1.1" mono />
+                {isHost && (
+                  <Field label="DNS Server" value={data.dnsServer ?? ''} onChange={(v) => upd({ dnsServer: v.trim() })} placeholder="e.g. 8.8.8.8" mono />
+                )}
                 <div className="flex flex-col gap-1">
                   <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">MAC Address</label>
                   <span className="font-mono text-sm text-gray-600 bg-gray-50 rounded-md px-2.5 py-1.5 border border-gray-100">
@@ -188,6 +192,13 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
                 </div>
                 {data.dhcpEnabled && (
                   <>
+                    <Field
+                      label="DNS server for clients"
+                      value={data.dhcpDns ?? ''}
+                      onChange={(v) => upd({ dhcpDns: v.trim() })}
+                      placeholder="e.g. 8.8.8.8"
+                      mono
+                    />
                     <Field
                       label="IP Pool (last octet range)"
                       value={(data.dhcpPool as string) ?? '100-200'}

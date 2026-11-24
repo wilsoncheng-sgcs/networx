@@ -5,7 +5,7 @@ import type { NetNode, NetEdge, NodeData, PanelType, RouteEntry, MacEntry, ArpEn
 import { tapView } from '../simulation/tap'
 import { setAnimSpeed, setStepping, scaledHop } from '../simulation/packets'
 import * as clock from '../simulation/clock'
-import { makeDefaultData, normaliseNode } from '../simulation/defaults'
+import { makeDefaultData, normaliseNetwork } from '../simulation/defaults'
 import type { Preset } from '../simulation/presets'
 
 const STORAGE_KEY = 'networx-state-v1'
@@ -32,7 +32,7 @@ function loadSaved(): { nodes: NetNode[]; edges: NetEdge[] } | null {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
     const parsed = JSON.parse(raw) as { nodes: NetNode[]; edges: NetEdge[] }
-    return { nodes: (parsed.nodes ?? []).map(normaliseNode), edges: parsed.edges ?? [] }
+    return { nodes: normaliseNetwork(parsed.nodes ?? [], parsed.edges ?? []), edges: parsed.edges ?? [] }
   } catch {
     return null
   }
@@ -182,9 +182,11 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
   addDevice: (type, position) => {
     const id = nextId(type)
     const data = makeDefaultData(type, id)
-    set((s) => ({
-      nodes: [...s.nodes, { id, type: 'device', position, data }],
-    }))
+    set((s) => {
+      // A new device gets the network's DNS server (and a new router hands it out), as on load
+      const [added] = normaliseNetwork([...s.nodes, { id, type: 'device', position, data }], s.edges).slice(-1)
+      return { nodes: [...s.nodes, added!] }
+    })
   },
 
   updateNodeData: (id, patch) =>
@@ -393,7 +395,7 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
 
   loadPreset: (preset) => {
     set({
-      nodes: preset.nodes.map(normaliseNode),
+      nodes: normaliseNetwork(preset.nodes, preset.edges),
       edges: preset.edges,
       layoutVersion: get().layoutVersion + 1,
       recentConns: {},

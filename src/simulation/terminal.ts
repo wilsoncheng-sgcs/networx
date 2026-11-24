@@ -2,7 +2,7 @@ import type { TerminalLine, PacketAnim, PendingCapture } from '../types'
 import { nodeById, simulatePingRtt, subnetToCidr } from './network'
 import { type TermContext, type Lines, out, err, info, self, delayLines } from './context'
 import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
-import { resolveTarget, isResolveError, isIp, dnsServerIpOf, routeTo, nodeForIp, type Resolution } from './resolve'
+import { resolveTarget, isResolveError, isIp, dnsServerIpOf, defaultDnsServer, routeTo, nodeForIp, type Resolution } from './resolve'
 import { playLookup } from './lookup'
 import { errnoText, findSegmentPath, isRoutingHop, ttlAfter, INTERNET_HOPS, type Route } from './routing'
 import { playUnreachable } from './unreachable'
@@ -234,6 +234,7 @@ function cmdIpconfig(args: string[], ctx: TermContext): Lines {
     out(`   IPv4 Address . . . . : ${ip || '(not set)'}`),
     out(`   Subnet Mask  . . . . : ${subnet || '255.255.255.0'} (/${cidr})`),
     out(`   Default Gateway  . . : ${gateway || '(not set)'}`),
+    out(`   DNS Servers  . . . . : ${dnsServerIpOf(ctx) || '(not set)'}`),
     out(`   Physical Address . . : ${mac}`),
   ]
 }
@@ -261,6 +262,9 @@ function cmdIfconfig(_args: string[], ctx: TermContext): Lines {
     out(`        inet6 fe80::1  prefixlen 64  scopeid 0x20<link>`),
     out(`        ether ${mac}  txqueuelen 1000  (Ethernet)`),
     out(`        Gateway: ${gateway || '(not set)'} (/${cidr})`),
+    out(''),
+    out('# /etc/resolv.conf'),
+    out(dnsServerIpOf(ctx) ? `nameserver ${dnsServerIpOf(ctx)}` : '# (no DNS server set)'),
   ]
 }
 
@@ -440,7 +444,9 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
       ...leg(path, ctx.edges, 'UDP', 'ACK',      3 * legMs, true), // router → client
     ]
     ctx.dispatchPackets?.(dhcpPackets)
-    ctx.dispatchCaptures?.(dhcpCaptures(src.data.mac, router, assignedIp, `${prefix}.1`, path, ctx, legMs))
+    // The DNS server the router hands out (its setting, else the network's DNS server)
+    const dns = typeof router.data.dhcpDns === 'string' ? router.data.dhcpDns : defaultDnsServer(router, ctx.nodes, ctx.edges)
+    ctx.dispatchCaptures?.(dhcpCaptures(src.data.mac, router, assignedIp, `${prefix}.1`, dns, path, ctx, legMs))
 
     // Update the node's IP address when the ACK arrives
     const ackMs = 4 * legMs
@@ -448,6 +454,7 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
       ip: assignedIp,
       gateway: `${prefix}.1`,
       subnet: '255.255.255.0',
+      dnsServer: dns,
     })
     if (ctx.schedule) ctx.schedule(ackMs, apply)
     else apply()
@@ -460,6 +467,7 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
       { ...out(''), delayMs: ackMs },
       { ...out(`inet ${assignedIp}/24 brd ${prefix}.255 scope global dynamic eth0`), delayMs: ackMs },
       { ...out(`   valid_lft ${LEASE_SECONDS}sec preferred_lft ${LEASE_SECONDS}sec`), delayMs: ackMs },
+      { ...out(`   gateway ${prefix}.1  DNS server ${dns || '(none)'}`), delayMs: ackMs },
       { ...info('ⓘ DHCP runs over UDP: the client sends from port 68 to port 67. It has no address yet, so it sends from 0.0.0.0 to the broadcast address 255.255.255.255.'), delayMs: ackMs },
     ]
   }
@@ -476,6 +484,7 @@ function dhcpCaptures(
   router: { data: { ip: string; mac: string } },
   offered: string,
   gateway: string,
+  dns: string,
   path: string[],
   ctx: TermContext,
   legMs: number,
@@ -502,9 +511,9 @@ function dhcpCaptures(
   })
   return [
     rec(0, true, 'Discover', `DHCP Discover\n  client MAC: ${clientMac}\n  asks: any DHCP server, please offer me an address`),
-    rec(1, false, 'Offer', `DHCP Offer\n  your address: ${offered}\n  subnet mask: 255.255.255.0\n  router (default gateway): ${gateway}\n  lease time: ${LEASE_SECONDS} s\n  DHCP server: ${router.data.ip}`),
+    rec(1, false, 'Offer', `DHCP Offer\n  your address: ${offered}\n  subnet mask: 255.255.255.0\n  router (default gateway): ${gateway}\n  domain name server: ${dns}\n  lease time: ${LEASE_SECONDS} s\n  DHCP server: ${router.data.ip}`),
     rec(2, true, 'Request', `DHCP Request\n  requested address: ${offered}\n  DHCP server: ${router.data.ip}`),
-    rec(3, false, 'ACK', `DHCP ACK\n  your address: ${offered}\n  lease time: ${LEASE_SECONDS} s`),
+    rec(3, false, 'ACK', `DHCP ACK\n  your address: ${offered}\n  subnet mask: 255.255.255.0\n  router (default gateway): ${gateway}\n  domain name server: ${dns}\n  lease time: ${LEASE_SECONDS} s`),
   ]
 }
 

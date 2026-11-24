@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { NetNode } from '../../types'
 import { run, careConnect } from './helpers'
 import { PRESETS } from '../presets'
-import { normaliseNode } from '../defaults'
+import { normaliseNetwork } from '../defaults'
 
 type Net = ReturnType<typeof careConnect>
 const set = (net: Net, id: string, patch: Partial<NetNode['data']>) => {
@@ -12,7 +12,7 @@ const set = (net: Net, id: string, patch: Partial<NetNode['data']>) => {
 }
 const presetNet = (id: string): Net => {
   const p = PRESETS.find((x) => x.id === id)!
-  return { nodes: structuredClone(p.nodes).map(normaliseNode), edges: structuredClone(p.edges) }
+  return { nodes: normaliseNetwork(structuredClone(p.nodes), p.edges), edges: structuredClone(p.edges) }
 }
 const NO_ANSWER = "ⓘ The DNS server 203.0.113.53 didn't answer, so the name couldn't be turned into an IP address. Connecting by IP address still works."
 
@@ -147,5 +147,48 @@ describe("A4 — the reply obeys the destination's own subnet decision", () => {
   it('restoring the mask restores the ping', () => {
     const net = set(careConnect(), 'docpc', { ip: '10.0.0.13', subnet: '255.255.255.0' })
     expect(run('docpc', 'ping 10.0.0.11', net).text).toContain('64 bytes from 10.0.0.11')
+  })
+})
+
+describe('B1 — each host has a DNS server setting', () => {
+  it('CareConnect: every host asks 203.0.113.53, and ipconfig / ifconfig show it', () => {
+    const net = careConnect()
+    for (const n of net.nodes.filter((x) => ['pc', 'laptop', 'dns', 'web', 'mail', 'file'].includes(x.data.deviceType))) {
+      expect(n.data.dnsServer, n.id).toBe('203.0.113.53')
+    }
+    expect(run('docpc', 'ipconfig').text).toContain('DNS Servers  . . . . : 203.0.113.53')
+    expect(run('docpc', 'ifconfig').text).toContain('nameserver 203.0.113.53')
+  })
+
+  it('a DNS server address with nothing behind it: lookups time out, IP addresses still work', () => {
+    const net = () => set(careConnect(), 'docpc', { dnsServer: '203.0.113.99' })
+    const ns = run('docpc', 'nslookup www.careconnect.example', net()).text
+    expect(ns).toContain(';; connection timed out; no servers could be reached')
+    expect(ns).toContain('The DNS server 203.0.113.99 didn')
+    expect(run('docpc', 'ping 203.0.113.80', net()).text).toContain('64 bytes from 203.0.113.80')
+  })
+
+  it('a device whose DNS server is not a DNS server (the web server) times out', () => {
+    const { text } = run('docpc', 'nslookup www.careconnect.example', set(careConnect(), 'docpc', { dnsServer: '203.0.113.80' }))
+    expect(text).toContain('no servers could be reached')
+  })
+
+  it('dhclient hands out the DNS server: in the output, the DHCP capture and the device settings', () => {
+    const net = careConnect()
+    const patient = net.nodes.find((n) => n.id === 'patient')!
+    net.nodes.push({ ...structuredClone(patient), id: 'newlaptop', data: { ...structuredClone(patient.data), label: 'New Laptop', ip: '', dnsServer: '', mac: 'aa:bb:cc:07:00:01' } })
+    net.edges.push({ id: 'nl-e1', source: 'newlaptop', target: 'homegw' })
+    const { text, captures, patches } = run('newlaptop', 'dhclient', net)
+    expect(text).toContain('DNS server 203.0.113.53')
+    const offer = captures.find((c) => c.info.startsWith('DHCP Offer'))!
+    expect(offer.payload).toContain('domain name server: 203.0.113.53')
+    expect(captures.find((c) => c.info.startsWith('DHCP ACK'))!.payload).toContain('domain name server: 203.0.113.53')
+    expect(patches.some((p) => p.patch.dnsServer === '203.0.113.53')).toBe(true)
+  })
+
+  it('other presets: their DNS server node, or 8.8.8.8 where there is none', () => {
+    expect(presetNet('school-network').nodes.find((n) => n.id === 'pc1')!.data.dnsServer).toBe('192.168.0.53')
+    expect(presetNet('home-network').nodes.find((n) => n.id === 'pc1')!.data.dnsServer).toBe('8.8.8.8')
+    expect(presetNet('star-lan').nodes.find((n) => n.id === 'pc1')!.data.dnsServer).toBe('')
   })
 })

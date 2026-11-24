@@ -110,6 +110,7 @@ export interface NodeData extends Record<string, unknown> {
   localMail?: MailMessage[]                         // any client: mail downloaded by POP3
   // ── Phase 4 ──
   dnsServer?: string                                // hosts: the DNS server this device asks ('' = none)
+  dhcpDns?: string                                  // routers/gateways: the DNS server DHCP hands to clients
 }
 
 export type NetNode = Node<NodeData>

@@ -1,14 +1,14 @@
 import type { NodeData, PendingCapture, NetNode, TerminalLine } from '../../types'
 import type { TermContext } from '../context'
 import { PRESETS } from '../presets'
-import { normaliseNode } from '../defaults'
+import { normaliseNetwork } from '../defaults'
 import { runCommand } from '../terminal'
 
 /** A fresh copy of the CareConnect preset, normalised as the app loads it. */
 export function careConnect() {
   const preset = PRESETS.find((p) => p.id === 'careconnect')!
   return {
-    nodes: structuredClone(preset.nodes).map(normaliseNode) as NetNode[],
+    nodes: normaliseNetwork(structuredClone(preset.nodes), preset.edges) as NetNode[],
     edges: structuredClone(preset.edges),
   }
 }
