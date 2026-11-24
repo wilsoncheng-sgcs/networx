@@ -1,7 +1,7 @@
 import type { NetNode, TerminalLine } from '../../types'
 import { type TermContext, type Lines, out, err, info, self } from '../context'
 import { resolveTarget, isResolveError, isIp, routeTo } from '../resolve'
-import { errnoText } from '../routing'
+import { errnoText, travelsPartWay } from '../routing'
 import { playUnreachable } from '../unreachable'
 import { playLookup, playFailedServers } from '../lookup'
 import { isListening } from '../services'
@@ -186,7 +186,7 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
   const route = routeTo(server, r.ip, ctx, { protocol: 'TCP', port })
   if (!server || !route.ok) {
     // Subnet, gateway or private-address rules stop it: show how far the SYN gets, then why
-    const timeout = !route.ok && (route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply' || route.failure === 'blocked')
+    const timeout = !route.ok && travelsPartWay(route.failure)
     const why = route.ok ? 'No route to host' : errnoText(route.failure)
     const failLines = [
       ...L(timeout

@@ -7,6 +7,7 @@ import { PRESETS } from '../simulation/presets'
 import { servicesFor, isListening } from '../simulation/services'
 import { RECORD_TYPES, RECORD_HELP, DEFAULT_TTL, validateRecord, rdata } from '../simulation/dns'
 import { dhcpRequest } from '../simulation/terminal'
+import { announcement, parsePrefix, validateIspRoute, routePrefix, nextHopLabel, lanNetwork } from '../simulation/isp'
 import * as clock from '../simulation/clock'
 
 
@@ -47,6 +48,145 @@ function Field({ label, value, onChange, placeholder = '', mono = false, readOnl
       />
     </div>
   )
+}
+
+/**
+ * The Internet node's Routing tab: the ISP's routes. A public network behind a router is reachable from
+ * the internet only while a route here points at it.
+ */
+function IspRoutesTab({ node }: { node: NetNode }) {
+  const { nodes, updateNodeData } = useNetworkStore()
+  const routes = node.data.ispRoutes ?? []
+  const [network, setNetwork] = useState('')
+  const [nextHop, setNextHop] = useState('')
+  const [error, setError] = useState('')
+
+  const add = () => {
+    const prefix = parsePrefix(network)
+    if (!prefix) { setError('Write the network as an address and prefix length, e.g. 203.0.113.0/24.'); return }
+    const route = { id: `isp${Date.now()}`, ...prefix, nextHop: nextHop.trim() }
+    const problem = validateIspRoute(route, nodes)
+    if (problem) { setError(problem); return }
+    if (routes.some((r) => r.destination === route.destination && r.subnet === route.subnet)) {
+      setError(`There is already a route for ${routePrefix(route)}. Delete it first to change it.`); return
+    }
+    updateNodeData(node.id, { ispRoutes: [...routes, route] })
+    setNetwork(''); setNextHop(''); setError('')
+  }
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <h3 className="text-sm font-semibold text-gray-700">ISP Routing Table</h3>
+        <p className="text-xs text-gray-400 mt-1">
+          The public networks the internet can reach, and the router each one is behind. A network with no route
+          here can't be reached from the internet, even with public addresses. Private ranges (10.x, 172.16–31.x,
+          192.168.x) are never carried. A router's WAN address is always reachable: it is on the ISP's own network.
+        </p>
+      </div>
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-left text-gray-400 border-b border-gray-100">
+            <th className="py-1 font-medium">Network</th>
+            <th className="py-1 font-medium">Next hop</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {routes.map((r) => (
+            <tr key={r.id} data-testid="isp-route-row" className="border-b border-gray-50">
+              <td className="py-1.5 pr-3 font-mono whitespace-nowrap">{routePrefix(r)}</td>
+              <td className="py-1.5 font-mono [overflow-wrap:anywhere]">{nextHopLabel(r.nextHop, nodes)}</td>
+              <td className="py-1.5 text-right">
+                <button
+                  data-testid="isp-delete"
+                  title="Delete this route"
+                  className="text-gray-300 hover:text-red-400 transition-colors"
+                  onClick={() => updateNodeData(node.id, { ispRoutes: routes.filter((x) => x.id !== r.id) })}
+                >
+                  <Trash2 size={12} />
+                </button>
+              </td>
+            </tr>
+          ))}
+          {routes.length === 0 && (
+            <tr><td colSpan={3} className="py-3 text-center text-gray-400">No routes: only devices plugged straight into the Internet node, and WAN addresses, can be reached.</td></tr>
+          )}
+        </tbody>
+      </table>
+      <div className="border border-gray-100 rounded-lg p-3 space-y-2 bg-gray-50">
+        <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Add a route</div>
+        <input
+          data-testid="isp-network"
+          className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-blue-300"
+          placeholder="Network, e.g. 203.0.113.0/24"
+          value={network}
+          onChange={(e) => { setNetwork(e.target.value); setError('') }}
+        />
+        <input
+          data-testid="isp-next-hop"
+          className="w-full border border-gray-200 rounded-md px-2.5 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-blue-300"
+          placeholder="Next hop: the router's WAN address"
+          value={nextHop}
+          onChange={(e) => { setNextHop(e.target.value); setError('') }}
+          onKeyDown={(e) => { if (e.key === 'Enter') add() }}
+        />
+        {error && <p data-testid="isp-error" className="text-xs text-red-600">{error}</p>}
+        <button
+          data-testid="isp-add"
+          onClick={add}
+          className="flex items-center gap-1 text-xs bg-blue-50 text-blue-600 hover:bg-blue-100 px-2 py-1 rounded transition-colors"
+        >
+          <Plus size={12} /> Add route
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** On a router's Routing tab: is its LAN announced to the internet (a route in the ISP's table)? */
+function InternetAnnouncement({ router }: { router: NetNode }) {
+  const { nodes, edges, updateNodeData } = useNetworkStore()
+  const a = announcement(router, nodes, edges)
+  if (a.state === 'no-address') return null
+  const box = (tone: string, children: React.ReactNode) => (
+    <div data-testid="announce-status" className={`mb-3 text-xs rounded px-2.5 py-2 border ${tone}`}>{children}</div>
+  )
+  const btn = (testId: string, label: string, onClick: () => void) => (
+    <button data-testid={testId} onClick={onClick}
+      className="mt-1.5 text-xs bg-white border border-current px-2 py-0.5 rounded hover:opacity-80 transition-opacity">{label}</button>
+  )
+  switch (a.state) {
+    case 'private':
+      return box('bg-gray-50 border-gray-100 text-gray-500',
+        <>LAN <span className="font-mono">{a.prefix}</span> is private ({a.range}): every network reuses these addresses, so ISPs never carry them and the internet can't reach this LAN.</>)
+    case 'no-internet':
+      return box('bg-gray-50 border-gray-100 text-gray-500', <>Not connected to the Internet node.</>)
+    case 'announced': {
+      const routes = a.cloud.data.ispRoutes
+      return box('bg-green-50 border-green-100 text-green-700', <>
+        Announced to the internet: the ISP routes <span className="font-mono">{a.prefix}</span> to <span className="font-mono">{a.route?.nextHop ?? a.nextHop}</span>.
+        {a.route && Array.isArray(routes) && <div>{btn('withdraw-button', 'Withdraw', () =>
+          updateNodeData(a.cloud.id, { ispRoutes: routes.filter((r) => r.id !== a.route!.id) }))}</div>}
+      </>)
+    }
+    case 'not-announced': {
+      const routes = a.cloud.data.ispRoutes ?? []
+      return box('bg-amber-50 border-amber-100 text-amber-700', <>
+        Not announced: the ISP has no route to <span className="font-mono">{a.prefix}</span>, so nothing on the internet can reach this LAN, even with public addresses.
+        <div>{btn('announce-button', 'Announce this LAN', () =>
+          updateNodeData(a.cloud.id, { ispRoutes: [...routes, { id: `isp${Date.now()}`, ...lanNetwork(router), nextHop: a.nextHop }] }))}</div>
+      </>)
+    }
+    case 'wrong-hop': {
+      const routes = a.cloud.data.ispRoutes ?? []
+      return box('bg-red-50 border-red-100 text-red-700', <>
+        The ISP's route for <span className="font-mono">{routePrefix(a.route!)}</span> points to <span className="font-mono">{nextHopLabel(a.route!.nextHop, nodes)}</span>, not to this router, so traffic for this LAN goes the wrong way.
+        <div>{btn('fix-hop-button', `Point it at ${a.nextHop}`, () =>
+          updateNodeData(a.cloud.id, { ispRoutes: routes.map((r) => r.id === a.route!.id ? { ...r, nextHop: a.nextHop } : r) }))}</div>
+      </>)
+    }
+  }
 }
 
 /**
@@ -124,7 +264,7 @@ function IpAssignment({ node }: { node: NetNode }) {
 export default function ConfigPanel({ nodeId, onClose }: Props) {
   const { nodes, updateNodeData, addRoute, removeRoute, addRule, removeRule } = useNetworkStore()
   const node = nodes.find((n) => n.id === nodeId)
-  const [tab, setTab] = useState<'basic' | 'advanced' | 'security' | 'wireless' | 'page' | 'records' | 'files' | 'mailboxes' | 'services'>('basic')
+  const [tab, setTab] = useState<'basic' | 'advanced' | 'isp' | 'security' | 'wireless' | 'page' | 'records' | 'files' | 'mailboxes' | 'services'>('basic')
 
   if (!node) return null
 
@@ -153,6 +293,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
   const isWap = data.deviceType === 'wap'
   const isFirewall = data.deviceType === 'firewall'
   const isGateway = data.deviceType === 'gateway'
+  const isCloud = data.deviceType === 'cloud'
   const isWeb = data.deviceType === 'web'
   const isDns = data.deviceType === 'dns'
   const isFile = data.deviceType === 'file'
@@ -165,6 +306,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
   const TABS = [
     { id: 'basic',    label: 'Basic' },
     ...(isSwitch ? [{ id: 'advanced', label: 'MAC Table' }] : []),
+    ...(isCloud ? [{ id: 'isp', label: 'Routing' }] : []),
     ...((isRouter   || isGateway) ? [{ id: 'advanced', label: 'Routing' }]   : []),
     ...((isWap      || isGateway) ? [{ id: 'wireless', label: 'Wireless' }]  : []),
     ...((isFirewall || isGateway) ? [{ id: 'security', label: 'Security' }]  : []),
@@ -305,6 +447,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
                 eth1 (LAN) = {data.ip || '(not set)'}
               </div>
             )}
+            <InternetAnnouncement router={node} />
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold text-gray-700">Routing Table</h3>
               <button
@@ -348,6 +491,8 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
             </div>
           </div>
         )}
+
+        {tab === 'isp' && isCloud && <IspRoutesTab node={node} />}
 
         {tab === 'advanced' && isSwitch && (
           <div>

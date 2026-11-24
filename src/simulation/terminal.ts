@@ -4,7 +4,7 @@ import { type TermContext, type Lines, out, err, info, self, delayLines } from '
 import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
 import { resolveTarget, isResolveError, isIp, dnsServersOf, defaultDnsServer, routeTo, nodeForIp, type Resolution } from './resolve'
 import { playLookup } from './lookup'
-import { errnoText, findSegmentPath, isRoutingHop, ttlAfter, INTERNET_HOPS, type Route } from './routing'
+import { errnoText, travelsPartWay, findSegmentPath, isRoutingHop, ttlAfter, INTERNET_HOPS, type Route } from './routing'
 import { playUnreachable } from './unreachable'
 import { tokenize } from './tokenize'
 import { runConversations, hostKeyFingerprint, newConversation, tcpOpen, tcpRefused } from './exchange'
@@ -130,6 +130,7 @@ function pingFailure(route: Extract<Route, { ok: false }>, target: string, ip: s
     case 'not-on-network':
     case 'no-reply':
     case 'blocked':
+    case 'no-route':
       body = [out(header), ...[0, 1, 2, 3].map((i) => out(`Request timeout for icmp_seq ${i}`)), ...stats(4), ...explain]
       break
     default:
@@ -192,7 +193,7 @@ function cmdTraceroute(args: string[], ctx: TermContext): Lines {
     let body: Lines
     if (route.failure === 'no-address' || route.failure === 'net-unreachable') {
       body = [err('traceroute: sendto: Network is unreachable'), ...explain]
-    } else if ((route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply' || route.failure === 'blocked') && route.reach) {
+    } else if (travelsPartWay(route.failure) && route.reach) {
       // The devices on the way still answer; after that, silence (a firewall that drops a probe doesn't answer it)
       const beyond = route.failure === 'no-reply' || route.failure === 'blocked'
       const answered = beyond ? route.reach.slice(0, -1) : route.reach

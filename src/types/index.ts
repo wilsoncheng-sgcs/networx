@@ -26,6 +26,14 @@ export interface RouteEntry {
   metric: number
 }
 
+/** A route in the ISP's table on the Internet node: a public network and the router it is behind. */
+export interface IspRoute {
+  id: string
+  destination: string   // network address, e.g. 203.0.113.0
+  subnet: string        // e.g. 255.255.255.0
+  nextHop: string       // the router's WAN address
+}
+
 export interface MacEntry {
   mac: string
   port: string
@@ -86,6 +94,8 @@ export interface NodeData extends Record<string, unknown> {
   isOn: boolean
   /** Host: address set by hand ('manual', the default) or obtained by DHCP. */
   ipMode?: 'manual' | 'dhcp'
+  /** Internet node: the ISP's routes to public networks (absent: every public network is reachable). */
+  ispRoutes?: IspRoute[]
   // Router
   routingTable: RouteEntry[]
   // Router DHCP server

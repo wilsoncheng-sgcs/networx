@@ -209,7 +209,7 @@ function askDnsServer(ctx: TermContext, qtype: DnsRecordType, serverOverride?: s
     const failed: Failed = route.failure === 'no-path' ? { ...route, failure: 'no-reply' } : route
     const explain = clientSide
       ? `ⓘ Names can't be looked up: the DNS server (${serverIp}) can't be reached. ${route.explain.replace(/^ⓘ /, '')}`
-      : route.failure === 'blocked' ? `${noAnswer} ${route.explain.replace(/^ⓘ /, '')}` : noAnswer
+      : route.failure === 'blocked' || route.failure === 'no-route' ? `${noAnswer} ${route.explain.replace(/^ⓘ /, '')}` : noAnswer
     return { ok: false, timeout: { qtype, serverIp, server, route: failed }, explain }
   }
   if (!server || !answersDns(server, serverIp)) {
