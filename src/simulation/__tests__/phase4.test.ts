@@ -1,0 +1,250 @@
+import { describe, it, expect } from 'vitest'
+import type { NetNode } from '../../types'
+import { run, careConnect } from './helpers'
+import { PRESETS } from '../presets'
+import { normaliseNetwork } from '../defaults'
+import { clearAllDnsCaches } from '../dnsCache'
+
+type Net = ReturnType<typeof careConnect>
+const set = (net: Net, id: string, patch: Partial<NetNode['data']>) => {
+  const n = net.nodes.find((x) => x.id === id)!
+  n.data = { ...n.data, ...patch }
+  return net
+}
+const presetNet = (id: string): Net => {
+  clearAllDnsCaches()
+  const p = PRESETS.find((x) => x.id === id)!
+  return { nodes: normaliseNetwork(structuredClone(p.nodes), p.edges), edges: structuredClone(p.edges) }
+}
+const NO_ANSWER = "ⓘ The DNS server 203.0.113.53 didn't answer, so the name couldn't be turned into an IP address. Connecting by IP address still works."
+
+describe('A1 — an unreachable DNS server times out; it never becomes 8.8.8.8', () => {
+  const offline = () => set(careConnect(), 'ccdns', { isOn: false })
+
+  it('nslookup: three queries to 203.0.113.53:53, no response, "no servers could be reached"', () => {
+    const { text, captures } = run('patient', 'nslookup www.careconnect.example', offline())
+    expect(text).toContain(';; connection timed out; no servers could be reached')
+    expect(text).not.toContain('8.8.8.8')
+    expect(text).not.toContain('NXDOMAIN')
+    const dns = captures.filter((c) => c.app === 'DNS')
+    expect(dns).toHaveLength(3)
+    expect(dns.every((c) => c.dstIp === '203.0.113.53' && c.dstPort === 53 && c.transport === 'UDP')).toBe(true)
+    expect(dns.every((c) => c.info.startsWith('Standard query') && !c.info.includes('response'))).toBe(true)
+  })
+
+  it('curl by name: could not resolve, and why; by IP address it still works', () => {
+    const { text } = run('patient', 'curl http://www.careconnect.example', offline())
+    expect(text).toContain('curl: (6) Could not resolve host: www.careconnect.example')
+    expect(text).toContain(NO_ANSWER)
+    expect(run('patient', 'curl http://203.0.113.80', offline()).text).toContain('CareConnect Medical Centre')
+  })
+
+  it('ping and ftp by name print their could-not-resolve line plus the ⓘ', () => {
+    const ping = run('patient', 'ping www.careconnect.example', offline()).text
+    expect(ping).toContain('Temporary failure in name resolution')
+    expect(ping).toContain(NO_ANSWER)
+    const ftp = run('reception', 'ftp files.careconnect.example ls', offline()).text
+    expect(ftp).toContain('ftp: files.careconnect.example: Name or service not known')
+    expect(ftp).toContain(NO_ANSWER)
+  })
+
+  it("the DNS server's own gateway is wrong: the queries arrive, no answer comes back", () => {
+    const net = set(careConnect(), 'ccdns', { gateway: '203.0.113.254' })
+    const { text, captures } = run('patient', 'nslookup www.careconnect.example', net)
+    expect(text).toContain(';; connection timed out; no servers could be reached')
+    const dns = captures.filter((c) => c.app === 'DNS')
+    expect(dns).toHaveLength(3)
+    expect(dns[0]!.route?.slice(-1)[0]).toBe('ccdns')
+  })
+
+  it("the client's own gateway is wrong: keeps the explanation of the client's mistake", () => {
+    const net = set(careConnect(), 'docpc', { gateway: '10.0.0.254' })
+    const { text } = run('docpc', 'curl http://www.careconnect.example', net)
+    expect(text).toContain('curl: (6) Could not resolve host')
+    expect(text).toContain("Names can't be looked up: the DNS server (203.0.113.53) can't be reached")
+    expect(text).toContain('default gateway 10.0.0.254')
+  })
+
+  it('a network with no DNS server node asks 8.8.8.8 as before', () => {
+    const { text } = run('pc1', 'nslookup example.com', presetNet('home-network'))
+    expect(text).toContain('Server:   8.8.8.8')
+    expect(text).toContain('93.184.216.34')
+  })
+})
+
+describe('A2 — traceroute shows only devices that route', () => {
+  const hopLines = (text: string) => text.split('\n').filter((l) => /^ \d+ {2}/.test(l))
+
+  it("Patient's Laptop → 203.0.113.80: Home Gateway, three backbone hops, CareConnect Router, CareConnect Web", () => {
+    const hops = hopLines(run('patient', 'traceroute 203.0.113.80').text)
+    expect(hops.map((l) => l.match(/\((.*?)\)/)![1])).toEqual([
+      'Home Gateway', 'ISP Gateway', 'Backbone router', 'Exchange point', 'CareConnect Router', 'CareConnect Web',
+    ])
+    expect(hops[0]).toContain('192.168.1.1')
+    expect(hops[4]).toContain('198.51.100.1')   // the interface the probe arrived on
+    expect(hops.join('\n')).not.toContain('Server Switch')
+    expect(hops.join('\n')).not.toContain('0.0.0.0')
+  })
+
+  it("same subnet (through the Clinic Gateway's built-in switch) is one line: the destination", () => {
+    const hops = hopLines(run('docpc', 'traceroute 10.0.0.11').text)
+    expect(hops).toHaveLength(1)
+    expect(hops[0]).toContain('10.0.0.11 (Reception PC)')
+  })
+
+  it('a hostname on the internet: the local routers, the backbone, then the host', () => {
+    const hops = hopLines(run('patient', 'traceroute example.com').text)
+    expect(hops.map((l) => l.match(/\((.*?)\)/)![1])).toEqual(['Home Gateway', 'ISP Gateway', 'Backbone router', 'Exchange point', 'example.com'])
+  })
+})
+
+describe('A3 — TTL drops only at routers', () => {
+  const ttls = (text: string) => [...text.matchAll(/ttl=(\d+)/g)].map((m) => Number(m[1]))
+
+  it("same subnet: the reply arrives with ttl=64", () => {
+    const { text, captures } = run('docpc', 'ping 10.0.0.11')
+    expect(new Set(ttls(text))).toEqual(new Set([64]))
+    const replies = captures.filter((c) => c.info.startsWith('Echo (ping) reply'))
+    expect(replies.every((c) => c.info.endsWith('ttl=64'))).toBe(true)
+  })
+
+  it('across routers: one less per router, three less for the internet backbone', () => {
+    // CareConnect Router (1) + backbone (3) + Clinic Gateway routing WAN → LAN (1)
+    expect(new Set(ttls(run('docpc', 'ping 203.0.113.80').text))).toEqual(new Set([59]))
+    // Request rows still leave with ttl=64
+    const req = run('docpc', 'ping 203.0.113.80').captures.filter((c) => c.info.startsWith('Echo (ping) request'))
+    expect(req.every((c) => c.info.endsWith('ttl=64'))).toBe(true)
+  })
+
+  it('the gateway itself is one hop away: ttl=64', () => {
+    expect(new Set(ttls(run('reception', 'ping 10.0.0.1').text))).toEqual(new Set([64]))
+  })
+})
+
+describe("A4 — the reply obeys the destination's own subnet decision", () => {
+  const mismatched = () => set(careConnect(), 'docpc', { ip: '10.0.1.13', subnet: '255.255.0.0', gateway: '10.0.0.1' })
+
+  it('mismatched masks: the requests reach Reception PC, no replies, and the ⓘ explains why', () => {
+    const { text, captures } = run('docpc', 'ping 10.0.0.11', mismatched())
+    expect(text).toContain('Request timeout for icmp_seq 0')
+    expect(text).not.toContain('bytes from')
+    expect(text).toContain(
+      "ⓘ Doctor's PC (10.0.1.13/16) thinks 10.0.0.11 is on its own subnet, but Reception PC (10.0.0.11/24) thinks 10.0.1.13 is on another one, so it sends the reply to its gateway 10.0.0.1 — which can't deliver it. Both ends of a subnet must use the same mask.",
+    )
+    const icmp = captures.filter((c) => c.app === 'ICMP')
+    expect(icmp.length).toBeGreaterThan(0)
+    expect(icmp.every((c) => c.info.startsWith('Echo (ping) request'))).toBe(true)
+    expect(icmp[0]!.route?.slice(-1)[0]).toBe('reception')
+  })
+
+  it('TCP: the SYN reaches the server, no SYN-ACK, the SYN is sent again', () => {
+    const net = mismatched()
+    const reception = net.nodes.find((n) => n.id === 'reception')!
+    reception.data = { ...reception.data, services: { ssh: true } }
+    const { captures } = run('docpc', 'ssh 10.0.0.11', net)
+    const tcp = captures.filter((c) => c.transport === 'TCP')
+    expect(tcp.map((c) => c.tcpFlags)).toEqual(['SYN', 'SYN', 'SYN'])
+  })
+
+  it('restoring the mask restores the ping', () => {
+    const net = set(careConnect(), 'docpc', { ip: '10.0.0.13', subnet: '255.255.255.0' })
+    expect(run('docpc', 'ping 10.0.0.11', net).text).toContain('64 bytes from 10.0.0.11')
+  })
+})
+
+describe('B1 — each host has a DNS server setting', () => {
+  it('CareConnect: every host asks 203.0.113.53, and ipconfig / ifconfig show it', () => {
+    const net = careConnect()
+    for (const n of net.nodes.filter((x) => ['pc', 'laptop', 'dns', 'web', 'mail', 'file'].includes(x.data.deviceType))) {
+      expect(n.data.dnsServer, n.id).toBe('203.0.113.53')
+    }
+    expect(run('docpc', 'ipconfig').text).toContain('DNS Servers  . . . . : 203.0.113.53')
+    expect(run('docpc', 'ifconfig').text).toContain('nameserver 203.0.113.53')
+  })
+
+  it('a DNS server address with nothing behind it: lookups time out, IP addresses still work', () => {
+    const net = () => set(careConnect(), 'docpc', { dnsServer: '203.0.113.99' })
+    const ns = run('docpc', 'nslookup www.careconnect.example', net()).text
+    expect(ns).toContain(';; connection timed out; no servers could be reached')
+    expect(ns).toContain('The DNS server 203.0.113.99 didn')
+    expect(run('docpc', 'ping 203.0.113.80', net()).text).toContain('64 bytes from 203.0.113.80')
+  })
+
+  it('a device whose DNS server is not a DNS server (the web server) times out', () => {
+    const { text } = run('docpc', 'nslookup www.careconnect.example', set(careConnect(), 'docpc', { dnsServer: '203.0.113.80' }))
+    expect(text).toContain('no servers could be reached')
+  })
+
+  it('dhclient hands out the DNS server: in the output, the DHCP capture and the device settings', () => {
+    const net = careConnect()
+    const patient = net.nodes.find((n) => n.id === 'patient')!
+    net.nodes.push({ ...structuredClone(patient), id: 'newlaptop', data: { ...structuredClone(patient.data), label: 'New Laptop', ip: '', dnsServer: '', mac: 'aa:bb:cc:07:00:01' } })
+    net.edges.push({ id: 'nl-e1', source: 'newlaptop', target: 'homegw' })
+    const { text, captures, patches } = run('newlaptop', 'dhclient', net)
+    expect(text).toContain('DNS server 203.0.113.53')
+    const offer = captures.find((c) => c.info.startsWith('DHCP Offer'))!
+    expect(offer.payload).toContain('domain name server: 203.0.113.53')
+    expect(captures.find((c) => c.info.startsWith('DHCP ACK'))!.payload).toContain('domain name server: 203.0.113.53')
+    expect(patches.some((p) => p.patch.dnsServer === '203.0.113.53')).toBe(true)
+  })
+
+  it('other presets: their DNS server node, or 8.8.8.8 where there is none', () => {
+    expect(presetNet('school-network').nodes.find((n) => n.id === 'pc1')!.data.dnsServer).toBe('192.168.0.53')
+    expect(presetNet('home-network').nodes.find((n) => n.id === 'pc1')!.data.dnsServer).toBe('8.8.8.8')
+    expect(presetNet('star-lan').nodes.find((n) => n.id === 'pc1')!.data.dnsServer).toBe('')
+  })
+})
+
+describe('B6 — two DNS servers', () => {
+  /** The lesson: a second DNS server (203.0.113.54) as a secondary, and the Patient's Laptop's alternate DNS server. */
+  function withSecondary(): Net {
+    const net = careConnect()
+    const primary = net.nodes.find((n) => n.id === 'ccdns')!
+    net.nodes.push({
+      ...structuredClone(primary), id: 'ccdns2',
+      data: { ...structuredClone(primary.data), label: 'DNS Server 2', ip: '203.0.113.54', mac: 'aa:bb:cc:02:00:54', dnsPrimary: '203.0.113.53' },
+    })
+    net.edges.push({ id: 'dns2-e1', source: 'ccsw', target: 'ccdns2' })
+    return set(net, 'patient', { dnsAlternate: '203.0.113.54' })
+  }
+
+  it('ipconfig and ifconfig show both DNS servers', () => {
+    const net = withSecondary()
+    expect(run('patient', 'ipconfig', net).text).toMatch(/DNS Servers {2}\. \. \. \. : 203\.0\.113\.53\n {26}203\.0\.113\.54/)
+    expect(run('patient', 'ifconfig', net).text).toContain('nameserver 203.0.113.53\nnameserver 203.0.113.54')
+  })
+
+  it('the first DNS server offline: after its three timeouts the alternate answers, and curl works', () => {
+    const net = set(withSecondary(), 'ccdns', { isOn: false })
+    const { text, captures } = run('patient', 'curl http://www.careconnect.example', net)
+    expect(text).toContain('CareConnect Medical Centre')
+    const dns = captures.filter((c) => c.app === 'DNS')
+    expect(dns.map((c) => `${c.dstIp}:${c.dstPort ?? ''}`).slice(0, 4)).toEqual(['203.0.113.53:53', '203.0.113.53:53', '203.0.113.53:53', '203.0.113.54:53'])
+    expect(dns[4]!.srcIp).toBe('203.0.113.54')
+    expect(dns[4]!.info).toContain('A 203.0.113.80')
+    // The alternate's query waits for the first server's three timeouts
+    expect(dns[3]!.delayMs).toBeGreaterThan(dns[2]!.delayMs)
+  })
+
+  it('the secondary keeps answering with its copy while the primary is off', () => {
+    const net = set(withSecondary(), 'ccdns', { isOn: false })
+    const out = run('patient', 'dig @203.0.113.54 careconnect.example MX', net).text
+    expect(out).toContain('10 mail.careconnect.example.')
+    expect(out).toContain('flags: qr aa rd ra')
+  })
+
+  it('while both are online the secondary mirrors the primary', () => {
+    const net = withSecondary()
+    const primary = net.nodes.find((n) => n.id === 'ccdns')!
+    primary.data = { ...primary.data, dnsRecords: [...primary.data.dnsRecords, { id: 'p1', name: 'portal.careconnect.example', type: 'A', value: '203.0.113.80', ttl: 3600 }] }
+    expect(run('patient', 'dig @203.0.113.54 portal.careconnect.example +short', net).text).toBe('203.0.113.80')
+  })
+
+  it('neither server answers: one timeout after the other', () => {
+    const net = set(set(withSecondary(), 'ccdns', { isOn: false }), 'ccdns2', { isOn: false })
+    const { text, captures } = run('patient', 'nslookup www.careconnect.example', net)
+    expect(text).toContain(';; connection timed out; no servers could be reached')
+    expect(text).toContain('Neither DNS server answered (203.0.113.53, 203.0.113.54)')
+    expect(captures.filter((c) => c.app === 'DNS')).toHaveLength(6)
+  })
+})

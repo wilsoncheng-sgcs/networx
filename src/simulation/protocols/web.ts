@@ -3,6 +3,7 @@ import { type TermContext, type Lines, out, err, info, self } from '../context'
 import { resolveTarget, isResolveError, isIp, routeTo } from '../resolve'
 import { errnoText } from '../routing'
 import { playUnreachable } from '../unreachable'
+import { playLookup, playFailedServers } from '../lookup'
 import { isListening } from '../services'
 import {
   type Step, type CertInfo, type CertProblem, type Leg,
@@ -115,7 +116,7 @@ export function pageFor(server: NetNode, host: string, ip: string): string {
 
 // ── Fetching a URL (shared by curl and the browser) ─────────────────────────
 
-export type WebFailure = 'bad-url' | 'nxdomain' | 'no-dns' | 'no-route' | 'unreachable' | 'timeout' | 'refused' | 'cert'
+export type WebFailure = 'bad-url' | 'nxdomain' | 'no-dns' | 'dns-failed' | 'no-route' | 'unreachable' | 'timeout' | 'refused' | 'cert'
 
 export interface WebResult {
   ok: boolean
@@ -160,6 +161,7 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
   const legs: Leg[] = []
   const resolvedLines: Lines = isResolveError(r) ? [] : [
     ...(r.dnsServerIp ? v(info(`ⓘ DNS: asked ${r.dnsServerIp} on port 53 (UDP): ${host} → ${r.ip}`)) : []),
+    ...(r.cached ? v(info(`ⓘ DNS: ${host} → ${r.ip} from this device's DNS cache (nothing sent)`)) : []),
     ...(isIp(host) ? [] : v(out(`* Host ${host}:${port} was resolved.`))),
     ...(isIp(host) ? [] : v(out(`* IPv4: ${r.ip}`))),
     ...v(out(`*   Trying ${r.ip}:${port}...`)),
@@ -169,22 +171,22 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
     const failLines = r.error === 'no-route'
       ? L(err(`curl: (7) Failed to connect to ${host} port ${port} after 0 ms: No route to host`))
       : [...L(err(`curl: (6) Could not resolve host: ${host}`)), ...(r.explain ? L(info(r.explain)) : [])]
-    const dnsLeg = dnsConversation(r, ctx, failLines)
-    if (!dnsLeg) return { ok: false, url, failure: r.error, lines: failLines, endMs: 0 }
-    const run = runConversations([dnsLeg], ctx)
-    return { ok: false, url, failure: r.error, lines: run.lines, endMs: run.endMs }
+    const run = playLookup(r, ctx, failLines)
+    const failure: WebFailure = r.error === 'nxdomain' || r.error === 'no-dns' ? r.error : 'dns-failed'
+    return { ok: false, url, failure, explain: r.explain, lines: run.lines, endMs: run.endMs }
   }
 
   const dnsLeg = dnsConversation(r, ctx, resolvedLines)
-  if (dnsLeg) legs.push(dnsLeg)
+  // DNS servers that never answered come first; the leg to the alternate waits for them
+  if (dnsLeg) legs.push({ ...dnsLeg, waitMs: playFailedServers(r, ctx) })
   const immediate: Lines = dnsLeg ? [] : resolvedLines
 
   // 2. Is anything listening on that port?
   const server = r.node
-  const route = routeTo(server, r.ip, ctx)
+  const route = routeTo(server, r.ip, ctx, { protocol: 'TCP', port })
   if (!server || !route.ok) {
     // Subnet, gateway or private-address rules stop it: show how far the SYN gets, then why
-    const timeout = !route.ok && (route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply')
+    const timeout = !route.ok && (route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply' || route.failure === 'blocked')
     const why = route.ok ? 'No route to host' : errnoText(route.failure)
     const failLines = [
       ...L(timeout

@@ -1,7 +1,11 @@
-import type { NetNode } from '../types'
+import type { NetNode, NetEdge, DnsRecord, DnsRecordType } from '../types'
 import type { TermContext } from './context'
 import { nodeById } from './network'
-import { routeBetween, nodeHasIp, type Route } from './routing'
+import { routeBetween, nodeHasIp, type Route, type Flow } from './routing'
+import { isListening } from './services'
+import { isPrivateIp } from './privateIp'
+import { cacheGet, cachePut } from './dnsCache'
+import { answerQuery, addressOf, normName, newTransactionId, PUBLIC_TTL, type AnswerRecord, type DnsAnswer } from './dns'
 
 /** Well-known internet names, answered (non-authoritatively) when the local DNS server has no record. */
 export const PUBLIC_IPS: Record<string, string> = {
@@ -25,11 +29,33 @@ export const PUBLIC_IPS: Record<string, string> = {
   'eduqas.co.uk':    '185.43.135.28',
 }
 
-/** The public resolver used when no DNS server node is reachable but the internet is. */
+/** The public resolver used when the network has no DNS server node but reaches the internet. */
 export const PUBLIC_RESOLVER_IP = '8.8.8.8'
 
 export function isIp(s: string): boolean {
   return /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(s)
+}
+
+type Failed = Extract<Route, { ok: false }>
+
+/** A DNS query that got an answer: who answered, and the path the query and answer travel. */
+export interface DnsQuery {
+  server: NetNode
+  serverIp: string
+  path: string[]
+  /** What was asked, and what came back. */
+  qtype: DnsRecordType
+  answer: DnsAnswer
+  /** Transaction id, e.g. 0x1a2b. */
+  id: string
+}
+
+/** A DNS server that never answered: how far the queries got, and why. */
+export interface DnsTimeout {
+  qtype: DnsRecordType
+  serverIp: string
+  server: NetNode | null
+  route: Failed
 }
 
 export interface Resolved {
@@ -39,15 +65,30 @@ export interface Resolved {
   dnsServerNode: NetNode | null
   dnsServerIp: string | null
   authoritative: boolean
+  /** The query to animate (absent when no DNS server was asked). */
+  query?: DnsQuery
+  /** Answered from this device's DNS cache: nothing was sent. */
+  cached?: boolean
+  /** DNS servers asked first that never answered (the alternate answered). */
+  failedFirst?: DnsTimeout[]
 }
 
 export interface ResolveError {
   name: string
-  error: 'nxdomain' | 'no-dns' | 'no-route'
+  /**
+   * nxdomain: no such name · timeout: the DNS server didn't answer · no-dns: no DNS server set ·
+   * servfail: the server couldn't answer (a CNAME loop) · nodata: the name has no A record ·
+   * no-ipv4: the name only has an IPv6 (AAAA) address
+   */
+  error: 'nxdomain' | 'no-dns' | 'no-route' | 'timeout' | 'servfail' | 'nodata' | 'no-ipv4'
   dnsServerNode: NetNode | null
   dnsServerIp: string | null
-  /** For no-dns: why the DNS server can't be reached (an ⓘ line), when the address rules are the reason. */
+  /** Why the name couldn't be looked up (an ⓘ line). */
   explain?: string
+  query?: DnsQuery
+  timeout?: DnsTimeout
+  cached?: boolean
+  failedFirst?: DnsTimeout[]
 }
 
 export type Resolution = Resolved | ResolveError
@@ -57,26 +98,21 @@ export function isResolveError(r: Resolution): r is ResolveError {
 }
 
 /** The route from this device to `dst` answering on `dstIp`, under the address rules (routing.ts). */
-export function routeTo(dst: NetNode | null, dstIp: string, ctx: TermContext): Route {
+export function routeTo(dst: NetNode | null, dstIp: string, ctx: TermContext, flow?: Flow): Route {
   const src = nodeById(ctx.selfId, ctx.nodes)
   if (!src) return { ok: false, failure: 'no-path', reach: null, explain: '' }
   if (dst && dst.data.isOn === false) {
     return { ok: false, failure: 'no-reply', reach: null, explain: `ⓘ ${dst.data.label} is switched off.` }
   }
-  return routeBetween(src, dst, dstIp, ctx.nodes, ctx.edges)
+  return routeBetween(src, dst, dstIp, ctx.nodes, ctx.edges, flow)
 }
 
-/** The address this device would use to reach a DNS server or the internet's resolver. */
-function serviceIp(node: NetNode): string {
-  return node.data.deviceType === 'cloud' ? PUBLIC_RESOLVER_IP : node.data.ip
-}
-
-function reachable(node: NetNode | undefined, ctx: TermContext): node is NetNode {
-  return !!node && node.data.isOn !== false && routeTo(node, serviceIp(node), ctx).ok
+function reachable(node: NetNode | undefined, ip: string, ctx: TermContext): node is NetNode {
+  return !!node && node.data.isOn !== false && routeTo(node, ip, ctx).ok
 }
 
 function reachableCloud(ctx: TermContext): NetNode | undefined {
-  return ctx.nodes.find((n) => n.data.deviceType === 'cloud' && reachable(n, ctx))
+  return ctx.nodes.find((n) => n.data.deviceType === 'cloud' && reachable(n, PUBLIC_RESOLVER_IP, ctx))
 }
 
 const publicIpSet = () => new Set(Object.values(PUBLIC_IPS))
@@ -93,9 +129,191 @@ export function nodeForIp(ip: string, ctx: TermContext): NetNode | null {
   return reachableCloud(ctx) ?? ctx.nodes.find((n) => n.data.deviceType === 'cloud') ?? null
 }
 
+// ── Which DNS server a device asks ───────────────────────────────────────────
+
 /**
- * Resolve a name or IP the way every command does (spec §2.5).
- * Never invents an address: an unknown name is NXDOMAIN.
+ * The DNS server a device asks when none is set: the network's DNS server node (the first one this
+ * device has a route to, else the first one); the public resolver 8.8.8.8 only when the network has
+ * no DNS server node but has an Internet node; else none.
+ */
+export function defaultDnsServer(self: NetNode, nodes: NetNode[], edges: NetEdge[]): string {
+  const dnsNodes = nodes.filter((n) => n.data.deviceType === 'dns' && n.data.ip)
+  if (dnsNodes.length) {
+    const routed = dnsNodes.find((n) => n.id === self.id || routeBetween(self, n, n.data.ip, nodes, edges).ok)
+    return (routed ?? dnsNodes[0]!).data.ip
+  }
+  return nodes.some((n) => n.data.deviceType === 'cloud') ? PUBLIC_RESOLVER_IP : ''
+}
+
+/** The DNS servers this device asks, in order: its DNS server, then its alternate. */
+export function dnsServersOf(ctx: TermContext): string[] {
+  const me = nodeById(ctx.selfId, ctx.nodes)
+  const alt = typeof me?.data.dnsAlternate === 'string' ? me.data.dnsAlternate.trim() : ''
+  return [dnsServerIpOf(ctx), alt].filter((ip, i, all) => ip && all.indexOf(ip) === i)
+}
+
+/** The DNS server address this device is configured to ask ('' = none). */
+export function dnsServerIpOf(ctx: TermContext): string {
+  const me = nodeById(ctx.selfId, ctx.nodes)
+  if (!me) return ''
+  return typeof me.data.dnsServer === 'string' ? me.data.dnsServer.trim() : defaultDnsServer(me, ctx.nodes, ctx.edges)
+}
+
+/** The node that would answer DNS queries sent to `ip` (8.8.8.8 is the Internet node), or null. */
+function dnsServerAt(ip: string, ctx: TermContext): NetNode | null {
+  if (ip === PUBLIC_RESOLVER_IP) {
+    return reachableCloud(ctx) ?? ctx.nodes.find((n) => n.data.deviceType === 'cloud') ?? null
+  }
+  const dns = ctx.nodes.filter((n) => n.data.deviceType === 'dns' && n.data.ip === ip)
+  if (dns.length) return dns.find((n) => reachable(n, ip, ctx)) ?? dns[0]!
+  return nodeForIp(ip, ctx)
+}
+
+/** Does this node answer DNS queries? (A DNS server node with its DNS service on, or the internet's resolver.) */
+function answersDns(node: NetNode, ip: string): boolean {
+  if (node.data.isOn === false) return false
+  if (node.data.deviceType === 'cloud') return ip === PUBLIC_RESOLVER_IP
+  return node.data.deviceType === 'dns' && isListening(node, 'dns')
+}
+
+/** Index on `path` of the last router before the destination (where an offline server's packets stop). */
+function lastRouterIndex(path: string[], nodes: NetNode[]): number {
+  for (let i = path.length - 2; i > 0; i--) {
+    const t = nodes.find((n) => n.id === path[i])?.data.deviceType ?? ''
+    if (['router', 'gateway', 'firewall', 'cloud'].includes(t)) return i
+  }
+  return path.length - 2
+}
+
+/**
+ * Send a query to this device's DNS server: the path it takes, or how far it gets when nothing answers.
+ * null when the device has no DNS server set.
+ */
+function askDnsServer(ctx: TermContext, qtype: DnsRecordType, serverOverride?: string):
+  | { ok: true; server: NetNode; serverIp: string; path: string[] }
+  | { ok: false; timeout: DnsTimeout; explain: string }
+  | null {
+  const src = nodeById(ctx.selfId, ctx.nodes)
+  const serverIp = serverOverride ?? dnsServerIpOf(ctx)
+  if (!src || !serverIp) return null
+  const server = dnsServerAt(serverIp, ctx)
+  const noAnswer = `ⓘ The DNS server ${serverIp} didn't answer, so the name couldn't be turned into an IP address. Connecting by IP address still works.`
+  // Route to the server even if it is switched off: the queries still travel as far as they can
+  const route: Route = server && server.id === src.id
+    ? { ok: true, path: [src.id] }
+    : routeBetween(src, server, serverIp, ctx.nodes, ctx.edges, { protocol: 'UDP', port: 53 })
+  if (!route.ok) {
+    // The client's own settings stop it (no address, no usable gateway): keep that explanation
+    const clientSide = route.failure === 'no-address' || route.failure === 'net-unreachable'
+      || (route.failure === 'host-unreachable' && route.arpFor !== serverIp)
+    const failed: Failed = route.failure === 'no-path' ? { ...route, failure: 'no-reply' } : route
+    const explain = clientSide
+      ? `ⓘ Names can't be looked up: the DNS server (${serverIp}) can't be reached. ${route.explain.replace(/^ⓘ /, '')}`
+      : route.failure === 'blocked' ? `${noAnswer} ${route.explain.replace(/^ⓘ /, '')}` : noAnswer
+    return { ok: false, timeout: { qtype, serverIp, server, route: failed }, explain }
+  }
+  if (!server || !answersDns(server, serverIp)) {
+    // Switched off: the last router can't hand the queries over. Not a DNS server: nothing answers on port 53.
+    const off = !!server && server.data.isOn === false
+    const reach = off ? route.path.slice(0, lastRouterIndex(route.path, ctx.nodes) + 1) : route.path
+    return { ok: false, timeout: { qtype, serverIp, server, route: { ok: false, failure: 'no-reply', reach, explain: noAnswer } }, explain: noAnswer }
+  }
+  return { ok: true, server, serverIp, path: route.path }
+}
+
+/** The records a server holds itself (it is authoritative for these). The internet's resolver holds none. */
+function zoneOf(server: NetNode, ctx: TermContext): DnsRecord[] {
+  if (server.data.deviceType !== 'dns') return []
+  const primary = primaryOf(server, ctx.nodes)
+  // A secondary copies its primary's records while both are online, and keeps serving its copy if the primary goes down
+  return primary && primary.data.isOn !== false ? primary.data.dnsRecords ?? [] : server.data.dnsRecords ?? []
+}
+
+/** The primary DNS server a secondary copies its records from, if it is one. */
+export function primaryOf(server: NetNode, nodes: NetNode[]): NetNode | undefined {
+  const ip = server.data.dnsPrimary?.trim()
+  return ip ? nodes.find((n) => n.id !== server.id && n.data.deviceType === 'dns' && n.data.ip === ip) : undefined
+}
+
+/** The well-known internet names Networx knows, as A records. */
+function publicRecords(name: string): AnswerRecord[] {
+  const ip = PUBLIC_IPS[name]
+  return ip ? [{ name, type: 'A', value: ip, ttl: PUBLIC_TTL }] : []
+}
+
+/**
+ * Records a server can look up for names it doesn't hold. A DNS server node knows the well-known
+ * internet names; the internet's resolver (8.8.8.8) also finds the records of DNS servers that are
+ * on the internet (public addresses), like a recursive resolver would.
+ */
+function lookupElsewhere(server: NetNode, ctx: TermContext): (name: string) => AnswerRecord[] {
+  if (server.data.deviceType !== 'cloud') return publicRecords
+  const internetZones = ctx.nodes.filter((n) => n.data.deviceType === 'dns' && n.data.isOn !== false && n.data.ip && !isPrivateIp(n.data.ip))
+  return (name) => {
+    for (const z of internetZones) {
+      const held = zoneOf(z, ctx).filter((r) => normName(r.name) === name)
+      if (held.length) return held.map((r) => ({ name, type: r.type, value: r.value.trim(), ttl: r.ttl, ...(r.type === 'MX' ? { priority: r.priority ?? 10 } : {}) }))
+    }
+    return publicRecords(name)
+  }
+}
+
+/** What a server answers for `name` and `qtype`. */
+export function serverAnswer(server: NetNode, name: string, qtype: DnsRecordType, ctx: TermContext): DnsAnswer {
+  return answerQuery(zoneOf(server, ctx), lookupElsewhere(server, ctx), name, qtype)
+}
+
+/** The result of asking this device's DNS server one question. */
+export type DnsLookup =
+  | { kind: 'answer'; answer: DnsAnswer; query: DnsQuery; failedFirst?: DnsTimeout[] }
+  /** From this device's cache: nothing sent; TTLs counted down; `remaining` seconds until it expires. */
+  | { kind: 'cached'; answer: DnsAnswer; serverIp: string; remaining: number }
+  | { kind: 'timeout'; timeout: DnsTimeout; explain: string; failedFirst?: DnsTimeout[] }
+  | { kind: 'no-dns'; explain: string }
+
+export interface LookupOptions {
+  /** Ask this server instead of the device's own (dig @server). Bypasses the cache. */
+  serverIp?: string
+  /** Use and fill this device's DNS cache (default true). nslookup asks the server every time. */
+  useCache?: boolean
+}
+
+/** Ask this device's DNS server (or `opts.serverIp`) for `qtype` records of `name` — or its cache. */
+export function lookupName(name: string, qtype: DnsRecordType, ctx: TermContext, opts: LookupOptions = {}): DnsLookup {
+  const useCache = opts.useCache !== false && !opts.serverIp
+  if (useCache) {
+    const hit = cacheGet(ctx.selfId, name, qtype)
+    if (hit) return { kind: 'cached', answer: hit.answer, serverIp: hit.serverIp, remaining: hit.remaining }
+  }
+  // The DNS server first; if it never answers (three tries), the alternate
+  const servers = opts.serverIp ? [opts.serverIp] : dnsServersOf(ctx)
+  if (!servers.length) {
+    const me = nodeById(ctx.selfId, ctx.nodes)
+    return { kind: 'no-dns', explain: `ⓘ ${me?.data.label ?? 'This device'} has no DNS server to ask, so names can't be turned into IP addresses. Connecting by IP address still works.` }
+  }
+  const failedFirst: DnsTimeout[] = []
+  for (const [i, serverIp] of servers.entries()) {
+    const asked = askDnsServer(ctx, qtype, serverIp)!
+    if (!asked.ok) {
+      if (i < servers.length - 1) { failedFirst.push(asked.timeout); continue }
+      const explain = failedFirst.length
+        ? `ⓘ Neither DNS server answered (${servers.join(', ')}), so the name couldn't be turned into an IP address. Connecting by IP address still works.`
+        : asked.explain
+      return { kind: 'timeout', timeout: asked.timeout, explain, ...(failedFirst.length ? { failedFirst } : {}) }
+    }
+    const answer = serverAnswer(asked.server, name, qtype, ctx)
+    if (useCache) cachePut(ctx.selfId, name, qtype, answer, asked.serverIp)
+    const query = { server: asked.server, serverIp: asked.serverIp, path: asked.path, qtype, answer, id: newTransactionId() }
+    return { kind: 'answer', answer, query, ...(failedFirst.length ? { failedFirst } : {}) }
+  }
+  throw new Error('unreachable')
+}
+
+/**
+ * Resolve a name or IP the way every command does (spec §2.5, Phase 4 A1/B2).
+ * The device asks its DNS server for the name's A record (following CNAMEs); it never invents an
+ * address, and never quietly asks another server: an unknown name is NXDOMAIN, a server that doesn't
+ * answer is a timeout. Connections use IPv4 only.
  */
 export function resolveTarget(nameOrIp: string, ctx: TermContext): Resolution {
   const name = nameOrIp
@@ -104,41 +322,27 @@ export function resolveTarget(nameOrIp: string, ctx: TermContext): Resolution {
     return { name, ip: nameOrIp, node: nodeForIp(nameOrIp, ctx), dnsServerNode: null, dnsServerIp: null, authoritative: true }
   }
 
-  const lower = nameOrIp.toLowerCase()
-  const dns = ctx.nodes.find((n) => n.data.deviceType === 'dns')
-  if (reachable(dns, ctx)) {
-    const dnsIp = dns.data.ip || PUBLIC_RESOLVER_IP
-    const record = (dns.data.dnsRecords ?? []).find((r) => r.hostname.toLowerCase() === lower)
-    const ip = record?.ip ?? PUBLIC_IPS[lower]
-    if (!ip) return { name, error: 'nxdomain', dnsServerNode: dns, dnsServerIp: dnsIp }
-    return { name, ip, node: nodeForIp(ip, ctx), dnsServerNode: dns, dnsServerIp: dnsIp, authoritative: !!record }
+  const looked = lookupName(nameOrIp, 'A', ctx)
+  if (looked.kind === 'no-dns') return { name, error: 'no-dns', dnsServerNode: null, dnsServerIp: null, explain: looked.explain }
+  if (looked.kind === 'timeout') {
+    return { name, error: 'timeout', dnsServerNode: looked.timeout.server, dnsServerIp: looked.timeout.serverIp, explain: looked.explain, timeout: looked.timeout, failedFirst: looked.failedFirst }
   }
-
-  const cloud = reachableCloud(ctx)
-  if (cloud) {
-    const ip = PUBLIC_IPS[lower]
-    if (!ip) return { name, error: 'nxdomain', dnsServerNode: cloud, dnsServerIp: PUBLIC_RESOLVER_IP }
-    return { name, ip, node: cloud, dnsServerNode: cloud, dnsServerIp: PUBLIC_RESOLVER_IP, authoritative: false }
+  const answer = looked.answer
+  const query = looked.kind === 'answer' ? looked.query : undefined
+  const asked = query
+    ? { name, dnsServerNode: query.server, dnsServerIp: query.serverIp, query, failedFirst: looked.kind === 'answer' ? looked.failedFirst : undefined }
+    : { name, dnsServerNode: null, dnsServerIp: null, cached: true }
+  if (answer.status === 'NXDOMAIN') return { ...asked, error: 'nxdomain' }
+  if (answer.status === 'SERVFAIL') {
+    return { ...asked, error: 'servfail', explain: `ⓘ The DNS server couldn't answer for ${name} (SERVFAIL): its CNAME records go round in a loop, or the chain is too long.` }
   }
-
-  return { name, error: 'no-dns', dnsServerNode: null, dnsServerIp: null, explain: dnsUnreachableExplain(ctx) }
-}
-
-/** Why no DNS server can be reached from this device, as an ⓘ line (undefined if there simply isn't one). */
-export function dnsUnreachableExplain(ctx: TermContext): string | undefined {
-  const dns = ctx.nodes.find((n) => n.data.deviceType === 'dns' && n.data.isOn !== false)
-  const target = dns ?? ctx.nodes.find((n) => n.data.deviceType === 'cloud')
-  if (!target) return undefined
-  const ip = serviceIp(target)
-  const route = routeTo(target, ip, ctx)
-  if (route.ok || !route.explain) return undefined
-  return `ⓘ Names can't be looked up: the DNS server (${ip}) can't be reached. ${route.explain.replace(/^ⓘ /, '')}`
-}
-
-/** The DNS server this device would ask: the DNS node if reachable, else the public resolver via the internet. */
-export function dnsServerFor(ctx: TermContext): { node: NetNode; ip: string } | null {
-  const dns = ctx.nodes.find((n) => n.data.deviceType === 'dns')
-  if (reachable(dns, ctx)) return { node: dns, ip: dns.data.ip || PUBLIC_RESOLVER_IP }
-  const cloud = reachableCloud(ctx)
-  return cloud ? { node: cloud, ip: PUBLIC_RESOLVER_IP } : null
+  const ip = addressOf(answer)
+  if (!ip) {
+    const server = query?.server ?? (looked.kind === 'cached' ? dnsServerAt(looked.serverIp, ctx) : null)
+    const v6 = !!server && serverAnswer(server, name, 'AAAA', ctx).records.some((r) => r.type === 'AAAA')
+    return v6
+      ? { ...asked, error: 'no-ipv4', explain: 'ⓘ This name only has an IPv6 address (AAAA record); Networx connects over IPv4 only.' }
+      : { ...asked, error: 'nodata', explain: `ⓘ ${name} exists, but has no A record, so there is no IPv4 address to connect to.` }
+  }
+  return { ...asked, ip, node: nodeForIp(ip, ctx), authoritative: answer.authoritative }
 }

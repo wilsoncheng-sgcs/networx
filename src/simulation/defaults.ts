@@ -1,4 +1,7 @@
-import type { NodeData, DeviceType, NetNode, Mailbox, StoredFile } from '../types'
+import type { NodeData, DeviceType, NetNode, NetEdge, Mailbox, StoredFile } from '../types'
+import { defaultDnsServer, PUBLIC_RESOLVER_IP } from './resolve'
+import { HOST_TYPES } from './routing'
+import { normaliseRecord } from './dns'
 
 let ipCounter = 10
 
@@ -114,10 +117,12 @@ export function makeDefaultData(type: DeviceType, id: string): NodeData {
       break
     case 'firewall':
       base.ip = nextIp()
+      // Inbound: only SSH, HTTPS and HTTP are let in; outbound and replies are allowed (spec §8)
       base.rules = [
-        { id: 'r1', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '22', action: 'allow' },
-        { id: 'r2', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '80', action: 'allow' },
-        { id: 'r3', direction: 'in', protocol: 'ANY', srcIp: '*', dstIp: '*', port: '*', action: 'deny' },
+        { id: 'r1', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '22',  action: 'allow' },
+        { id: 'r2', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '443', action: 'allow' },
+        { id: 'r3', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '80',  action: 'allow' },
+        { id: 'r4', direction: 'in', protocol: 'ANY', srcIp: '*', dstIp: '*', port: '*',   action: 'deny' },
       ]
       break
     case 'gateway':
@@ -130,18 +135,17 @@ export function makeDefaultData(type: DeviceType, id: string): NodeData {
       base.ssid = 'HomeNet-5G'
       base.wpaKey = 'password123'
       base.band = '5GHz'
+      // A typical home gateway: nothing from the internet gets in; outbound and replies are allowed (spec §8)
       base.rules = [
-        { id: 'r1', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '22', action: 'allow' },
-        { id: 'r2', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '80', action: 'allow' },
-        { id: 'r3', direction: 'in', protocol: 'ANY', srcIp: '*', dstIp: '*', port: '*', action: 'deny' },
+        { id: 'r1', direction: 'in', protocol: 'ANY', srcIp: '*', dstIp: '*', port: '*', action: 'deny' },
       ]
       break
     case 'dns':
       base.ip = '192.168.1.53'
       base.label = 'DNS Server'
       base.dnsRecords = [
-        { id: 'dr1', hostname: 'www.school.local', ip: '192.168.1.80' },
-        { id: 'dr2', hostname: 'intranet.school.local', ip: '192.168.1.81' },
+        { id: 'dr1', name: 'www.school.local', type: 'A', value: '192.168.1.80', ttl: 3600 },
+        { id: 'dr2', name: 'intranet.school.local', type: 'A', value: '192.168.1.81', ttl: 3600 },
       ]
       break
     case 'web':
@@ -190,5 +194,27 @@ export function normaliseNode(node: NetNode): NetNode {
   for (const [key, value] of Object.entries(defaults)) {
     if (data[key] === undefined) data[key] = value
   }
+  // DNS records saved before Phase 4 were { hostname, ip }: they become A records
+  if (Array.isArray(data.dnsRecords)) data.dnsRecords = (data.dnsRecords as Parameters<typeof normaliseRecord>[0][]).map(normaliseRecord)
   return { ...node, data: data as NodeData }
+}
+
+/**
+ * Normalise every node, then fill the settings that depend on the rest of the network:
+ * each host's DNS server (the network's DNS server node, else 8.8.8.8 when there is an Internet node,
+ * else none), and the DNS server a router or gateway hands out by DHCP.
+ */
+export function normaliseNetwork(nodes: NetNode[], edges: NetEdge[]): NetNode[] {
+  const all = nodes.map(normaliseNode)
+  const dnsNode = all.find((n) => n.data.deviceType === 'dns' && n.data.ip)
+  const forClients = dnsNode?.data.ip ?? (all.some((n) => n.data.deviceType === 'cloud') ? PUBLIC_RESOLVER_IP : '')
+  return all.map((n) => {
+    if (HOST_TYPES.includes(n.data.deviceType) && typeof n.data.dnsServer !== 'string') {
+      return { ...n, data: { ...n.data, dnsServer: defaultDnsServer(n, all, edges) } }
+    }
+    if ((n.data.deviceType === 'router' || n.data.deviceType === 'gateway') && typeof n.data.dhcpDns !== 'string') {
+      return { ...n, data: { ...n.data, dhcpDns: forClients } }
+    }
+    return n
+  })
 }

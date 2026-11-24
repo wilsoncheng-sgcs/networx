@@ -1,11 +1,20 @@
 import { useState } from 'react'
-import { X, Plus, Trash2, Power, RotateCcw } from 'lucide-react'
+import { X, Plus, Trash2, Power, RotateCcw, ChevronUp, ChevronDown, Pencil } from 'lucide-react'
 import { useNetworkStore } from '../store'
-import type { FirewallRule, DnsRecord, StoredFile, Mailbox, NetNode, CertificateState } from '../types'
+import type { FirewallRule, DnsRecord, DnsRecordType, StoredFile, Mailbox, NetNode, CertificateState } from '../types'
 import { DEFAULT_ACCOUNT, defaultMailboxes } from '../simulation/defaults'
 import { PRESETS } from '../simulation/presets'
 import { servicesFor, isListening } from '../simulation/services'
+import { RECORD_TYPES, RECORD_HELP, DEFAULT_TTL, validateRecord, rdata } from '../simulation/dns'
 
+
+/** A copy of `list` with the item at `from` moved to `to`. */
+function moveItem<T>(list: T[], from: number, to: number): T[] {
+  const copy = [...list]
+  const [item] = copy.splice(from, 1)
+  copy.splice(to, 0, item!)
+  return copy
+}
 
 interface Props {
   nodeId: string
@@ -33,7 +42,7 @@ function Field({ label, value, onChange, placeholder = '', mono = false }: {
 }
 
 export default function ConfigPanel({ nodeId, onClose }: Props) {
-  const { nodes, updateNodeData, addRoute, removeRoute, addRule, removeRule, addDnsRecord, removeDnsRecord } = useNetworkStore()
+  const { nodes, updateNodeData, addRoute, removeRoute, addRule, removeRule } = useNetworkStore()
   const node = nodes.find((n) => n.id === nodeId)
   const [tab, setTab] = useState<'basic' | 'advanced' | 'security' | 'wireless' | 'page' | 'records' | 'files' | 'mailboxes' | 'services'>('basic')
 
@@ -44,14 +53,6 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
 
   function handleAddRoute() {
     addRoute(nodeId, { destination: '10.0.0.0', subnet: '255.255.255.0', gateway: '0.0.0.0', iface: 'eth0', metric: 1 })
-  }
-
-  function handleAddDnsRecord() {
-    addDnsRecord(nodeId, {
-      id: `dr${Date.now()}`,
-      hostname: 'host.local',
-      ip: '192.168.1.',
-    } satisfies DnsRecord)
   }
 
   function handleAddRule() {
@@ -78,6 +79,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
   const isMail = data.deviceType === 'mail'
   const hasServices = ['web', 'dns', 'mail', 'file', 'server'].includes(data.deviceType)
   const hasIp = !(isSwitch || isHub)
+  const isHost = ['pc', 'laptop', 'server', 'dns', 'web', 'mail', 'file'].includes(data.deviceType)
 
   const TABS = [
     { id: 'basic',    label: 'Basic' },
@@ -148,6 +150,12 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
                 <Field label={(isRouter || isGateway) ? 'LAN IP — eth1 (network-facing)' : 'IP Address'} value={data.ip} onChange={(v) => upd({ ip: v })} placeholder="192.168.1.x" mono />
                 <Field label="Subnet Mask" value={data.subnet} onChange={(v) => upd({ subnet: v })} placeholder="255.255.255.0" mono />
                 <Field label="Default Gateway" value={data.gateway} onChange={(v) => upd({ gateway: v })} placeholder="192.168.1.1" mono />
+                {isHost && (
+                  <>
+                    <Field label="DNS Server" value={data.dnsServer ?? ''} onChange={(v) => upd({ dnsServer: v.trim() })} placeholder="e.g. 8.8.8.8" mono />
+                    <Field label="Alternate DNS Server" value={data.dnsAlternate ?? ''} onChange={(v) => upd({ dnsAlternate: v.trim() })} placeholder="asked if the first doesn't answer" mono />
+                  </>
+                )}
                 <div className="flex flex-col gap-1">
                   <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">MAC Address</label>
                   <span className="font-mono text-sm text-gray-600 bg-gray-50 rounded-md px-2.5 py-1.5 border border-gray-100">
@@ -180,6 +188,13 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
                 </div>
                 {data.dhcpEnabled && (
                   <>
+                    <Field
+                      label="DNS server for clients"
+                      value={data.dhcpDns ?? ''}
+                      onChange={(v) => upd({ dhcpDns: v.trim() })}
+                      placeholder="e.g. 8.8.8.8"
+                      mono
+                    />
                     <Field
                       label="IP Pool (last octet range)"
                       value={(data.dhcpPool as string) ?? '100-200'}
@@ -328,63 +343,19 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
         )}
 
         {tab === 'records' && isDns && (
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-semibold text-gray-700">DNS Records (A)</h3>
-              <button
-                className="flex items-center gap-1 text-xs bg-blue-50 text-blue-600 hover:bg-blue-100 px-2 py-1 rounded transition-colors"
-                onClick={handleAddDnsRecord}
-              >
-                <Plus size={12} /> Add Record
-              </button>
-            </div>
-            <p className="text-xs text-gray-400 mb-3">
-              Local hostnames resolved by this server. Use{' '}
-              <code className="bg-gray-100 px-1 rounded font-mono">nslookup host.local</code>{' '}
-              from any connected device.
-            </p>
-            <div className="space-y-2">
-              {(data.dnsRecords ?? []).map((rec) => (
-                <div key={rec.id} className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2 relative">
-                  <div className="flex-1 min-w-0">
-                    <input
-                      className="w-full font-mono text-xs border border-gray-200 rounded px-1.5 py-0.5 mb-1 bg-white"
-                      placeholder="hostname.local"
-                      value={rec.hostname}
-                      onChange={(e) => {
-                        const updated = (data.dnsRecords ?? []).map((r) =>
-                          r.id === rec.id ? { ...r, hostname: e.target.value } : r
-                        )
-                        upd({ dnsRecords: updated })
-                      }}
-                    />
-                    <input
-                      className="w-full font-mono text-xs border border-gray-200 rounded px-1.5 py-0.5 bg-white"
-                      placeholder="192.168.1.x"
-                      value={rec.ip}
-                      onChange={(e) => {
-                        const updated = (data.dnsRecords ?? []).map((r) =>
-                          r.id === rec.id ? { ...r, ip: e.target.value } : r
-                        )
-                        upd({ dnsRecords: updated })
-                      }}
-                    />
-                  </div>
-                  <button
-                    className="text-gray-300 hover:text-red-400 transition-colors flex-shrink-0"
-                    onClick={() => removeDnsRecord(nodeId, rec.id)}
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </div>
-              ))}
-              {(data.dnsRecords ?? []).length === 0 && (
-                <p className="text-xs text-gray-400 text-center py-4">
-                  No records. Add an A record above.
-                </p>
-              )}
-            </div>
-          </div>
+          <>
+            <SecondaryToggle
+              node={node}
+              nodes={nodes}
+              onChange={(dnsPrimary) => {
+                const primary = nodes.find((n) => n.id !== node.id && n.data.deviceType === 'dns' && n.data.ip === dnsPrimary)
+                upd(dnsPrimary && primary ? { dnsPrimary, dnsRecords: primary.data.dnsRecords.map((r) => ({ ...r })) } : { dnsPrimary: dnsPrimary ?? '' })
+              }}
+            />
+            {data.dnsPrimary
+              ? <RecordsTable records={data.dnsRecords ?? []} />
+              : <RecordsTab records={data.dnsRecords ?? []} onChange={(dnsRecords) => upd({ dnsRecords })} />}
+          </>
         )}
 
         {tab === 'files' && isFile && (
@@ -492,21 +463,50 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
                 <Plus size={12} /> Add Rule
               </button>
             </div>
-            <p className="text-xs text-gray-400 mb-3">Rules are evaluated top-to-bottom. First match wins.</p>
+            <p className="text-xs text-gray-400 mb-1">
+              Checked when a connection starts, top to bottom: the first rule that matches wins; no match → allowed.
+              Replies to an allowed connection always get through.
+            </p>
+            <p className="text-xs text-gray-400 mb-3">
+              <strong>Inbound</strong> = started from the internet side; <strong>Outbound</strong> = started from this network.
+              A denied connection is dropped, so the client times out.
+            </p>
             <div className="space-y-2">
-              {data.rules.map((rule) => (
+              {data.rules.map((rule, idx) => (
                 <div
                   key={rule.id}
+                  data-testid="firewall-rule"
                   className={`rounded-lg p-3 text-xs space-y-2 relative border ${
                     rule.action === 'allow' ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'
                   }`}
                 >
-                  <button
-                    className="absolute top-2 right-2 text-gray-300 hover:text-red-400 transition-colors"
-                    onClick={() => removeRule(nodeId, rule.id)}
-                  >
-                    <Trash2 size={12} />
-                  </button>
+                  <div className="absolute top-2 right-2 flex flex-col items-center gap-0.5">
+                    <button
+                      className="text-gray-300 hover:text-red-400 transition-colors"
+                      onClick={() => removeRule(nodeId, rule.id)}
+                      title="Delete rule"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                    <button
+                      className="text-gray-400 hover:text-gray-700 disabled:opacity-30 transition-colors"
+                      disabled={idx === 0}
+                      onClick={() => upd({ rules: moveItem(data.rules, idx, idx - 1) })}
+                      title="Move up (checked earlier)"
+                      data-testid="rule-up"
+                    >
+                      <ChevronUp size={13} />
+                    </button>
+                    <button
+                      className="text-gray-400 hover:text-gray-700 disabled:opacity-30 transition-colors"
+                      disabled={idx === data.rules.length - 1}
+                      onClick={() => upd({ rules: moveItem(data.rules, idx, idx + 1) })}
+                      title="Move down (checked later)"
+                    >
+                      <ChevronDown size={13} />
+                    </button>
+                  </div>
+                  <div className="text-[10px] font-semibold text-gray-500">Rule {idx + 1}</div>
                   <div className="grid grid-cols-3 gap-2 pr-5">
                     {/* Direction */}
                     <div>
@@ -780,6 +780,206 @@ function MailboxesTab({ domain, mailboxes, onDomain, onMailboxes, onRestore }: {
         ))}
         {mailboxes.length === 0 && <p className="text-xs text-gray-400 text-center py-4">No mailboxes.</p>}
       </div>
+    </div>
+  )
+}
+
+// ─── DNS server: records ──────────────────────────────────────────────────────
+
+/** A host name that may wrap after each dot (never in the middle of a label). */
+function DottedName({ name }: { name: string }) {
+  const parts = name.split('.')
+  return <>{parts.map((p, i) => <span key={i}>{p}{i < parts.length - 1 ? '.' : ''}{i < parts.length - 1 && <wbr />}</span>)}</>
+}
+
+const VALUE_PLACEHOLDER: Record<DnsRecordType, string> = {
+  A: '203.0.113.80',
+  AAAA: '2001:db8::80',
+  CNAME: 'careconnect.example',
+  MX: 'mail.careconnect.example',
+  NS: 'ns1.careconnect.example',
+  TXT: '"v=spf1 mx -all"',
+}
+
+/** Name · Type · Value · TTL (and Priority for MX). A record is only saved when it is valid. */
+function RecordsTab({ records, onChange }: { records: DnsRecord[]; onChange: (r: DnsRecord[]) => void }) {
+  const blank = { name: '', type: 'A' as DnsRecordType, value: '', ttl: String(DEFAULT_TTL), priority: '10' }
+  const [draft, setDraft] = useState(blank)
+  const [editing, setEditing] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  function reset() {
+    setDraft(blank)
+    setEditing(null)
+    setError(null)
+  }
+
+  function save() {
+    const ttl = draft.ttl.trim() === '' ? NaN : Number(draft.ttl)
+    const rec: DnsRecord = {
+      id: editing ?? `dr${Date.now()}`,
+      name: draft.name.trim(),
+      type: draft.type,
+      value: draft.value.trim(),
+      ttl,
+      ...(draft.type === 'MX' ? { priority: draft.priority.trim() === '' ? NaN : Number(draft.priority) } : {}),
+    }
+    const problem = validateRecord(rec, records)
+    if (problem) {
+      setError(problem)
+      return
+    }
+    onChange(editing ? records.map((r) => (r.id === editing ? rec : r)) : [...records, rec])
+    reset()
+  }
+
+  function edit(r: DnsRecord) {
+    setDraft({ name: r.name, type: r.type, value: r.value, ttl: String(r.ttl), priority: String(r.priority ?? 10) })
+    setEditing(r.id)
+    setError(null)
+  }
+
+  const input = 'w-full border border-gray-200 rounded px-1.5 py-1 text-xs font-mono bg-white outline-none focus:ring-2 focus:ring-blue-300'
+  return (
+    <div className="space-y-3">
+      <div>
+        <h3 className="text-sm font-semibold text-gray-700">DNS Records</h3>
+        <p className="text-xs text-gray-400">
+          The records this server holds (it is authoritative for them). Try{' '}
+          <code className="bg-gray-100 px-1 rounded font-mono">dig</code> or{' '}
+          <code className="bg-gray-100 px-1 rounded font-mono">nslookup</code> from any device.
+        </p>
+      </div>
+
+      <div className="border border-gray-100 rounded-lg overflow-hidden">
+        <table className="w-full text-xs">
+          <thead className="bg-gray-50 text-gray-500">
+            <tr>
+              <th className="text-left font-semibold px-2 py-1">Name</th>
+              <th className="text-left font-semibold px-1 py-1">Type</th>
+              <th className="text-left font-semibold px-1 py-1">Value</th>
+              <th className="text-right font-semibold px-1 py-1">TTL</th>
+              <th className="w-10" />
+            </tr>
+          </thead>
+          <tbody>
+            {records.map((r) => (
+              <tr key={r.id} data-testid="dns-record-row" className={`border-t border-gray-100 ${editing === r.id ? 'bg-blue-50' : ''}`}>
+                <td className="px-2 py-1 font-mono"><DottedName name={r.name} /></td>
+                <td className="px-1 py-1 font-mono font-semibold text-gray-600">{r.type}</td>
+                <td className="px-1 py-1 font-mono [overflow-wrap:anywhere]" title={rdata(r)}>{r.type === 'MX' && `${r.priority ?? 10} `}<DottedName name={r.value} /></td>
+                <td className="px-1 py-1 font-mono text-right">{r.ttl}</td>
+                <td className="px-1 py-1">
+                  <div className="flex items-center justify-end gap-1">
+                    <button className="text-gray-300 hover:text-blue-500" onClick={() => edit(r)} title="Edit" data-testid="dns-edit">
+                      <Pencil size={11} />
+                    </button>
+                    <button
+                      className="text-gray-300 hover:text-red-400"
+                      onClick={() => { onChange(records.filter((x) => x.id !== r.id)); if (editing === r.id) reset() }}
+                      title="Delete"
+                    >
+                      <Trash2 size={11} />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {records.length === 0 && (
+              <tr><td colSpan={5} className="text-center text-gray-400 py-3">No records yet. Add one below.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="border border-gray-100 rounded-lg p-3 space-y-2 bg-gray-50">
+        <div className="text-xs font-semibold text-gray-600">{editing ? 'Edit record' : 'Add a record'}</div>
+        <div className="grid grid-cols-[1fr_auto] gap-2">
+          <input className={input} placeholder="portal.careconnect.example" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} data-testid="dns-name" aria-label="Name" />
+          <select className={input} value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value as DnsRecordType })} data-testid="dns-type" aria-label="Type">
+            {RECORD_TYPES.map((t) => <option key={t}>{t}</option>)}
+          </select>
+        </div>
+        <p className="text-[11px] text-gray-500">{RECORD_HELP[draft.type]}</p>
+        <input className={input} placeholder={VALUE_PLACEHOLDER[draft.type]} value={draft.value} onChange={(e) => setDraft({ ...draft, value: e.target.value })} data-testid="dns-value" aria-label="Value" />
+        <div className="grid grid-cols-2 gap-2">
+          <label className="text-[11px] text-gray-500">TTL (seconds)
+            <input className={input} value={draft.ttl} onChange={(e) => setDraft({ ...draft, ttl: e.target.value })} data-testid="dns-ttl" />
+          </label>
+          {draft.type === 'MX' && (
+            <label className="text-[11px] text-gray-500">Priority
+              <input className={input} value={draft.priority} onChange={(e) => setDraft({ ...draft, priority: e.target.value })} data-testid="dns-priority" />
+            </label>
+          )}
+        </div>
+        {error && <p className="text-xs text-red-600" data-testid="dns-error">{error}</p>}
+        <div className="flex gap-2">
+          <button className="flex items-center gap-1 text-xs bg-blue-600 text-white hover:bg-blue-700 px-2.5 py-1 rounded" onClick={save} data-testid="dns-save">
+            {editing ? 'Save' : <><Plus size={12} /> Add record</>}
+          </button>
+          {editing && (
+            <button className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1" onClick={reset}>Cancel</button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** A DNS server can be a secondary: it copies another server's records (read-only here). */
+function SecondaryToggle({ node, nodes, onChange }: { node: NetNode; nodes: NetNode[]; onChange: (primaryIp: string | null) => void }) {
+  const others = nodes.filter((n) => n.id !== node.id && n.data.deviceType === 'dns' && n.data.ip)
+  const on = !!node.data.dnsPrimary
+  const [ip, setIp] = useState(node.data.dnsPrimary || others[0]?.data.ip || '')
+  const primary = others.find((n) => n.data.ip === node.data.dnsPrimary)
+  return (
+    <div className="border border-gray-100 rounded-lg p-3 mb-3 bg-gray-50 space-y-2">
+      <label className="flex items-center gap-2 text-xs font-medium text-gray-700">
+        <input type="checkbox" checked={on} onChange={(e) => onChange(e.target.checked ? ip : null)} data-testid="dns-secondary" />
+        Copy records from (primary):
+        <input
+          className="w-32 border border-gray-200 rounded px-1.5 py-0.5 text-xs font-mono bg-white"
+          value={on ? node.data.dnsPrimary : ip}
+          onChange={(e) => { setIp(e.target.value.trim()); if (on) onChange(e.target.value.trim()) }}
+          placeholder="203.0.113.53"
+          data-testid="dns-primary-ip"
+        />
+      </label>
+      {on && (
+        <p className="text-[11px] text-gray-500">
+          {primary
+            ? `A secondary: it copies ${primary.data.label}'s records while both are online, and keeps answering with its copy if the primary goes offline.`
+            : 'No DNS server has that address yet.'}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/** The records, read-only (a secondary's copy). */
+function RecordsTable({ records }: { records: DnsRecord[] }) {
+  return (
+    <div className="border border-gray-100 rounded-lg overflow-hidden">
+      <table className="w-full text-xs">
+        <thead className="bg-gray-50 text-gray-500">
+          <tr>
+            <th className="text-left font-semibold px-2 py-1">Name</th>
+            <th className="text-left font-semibold px-1 py-1">Type</th>
+            <th className="text-left font-semibold px-1 py-1">Value</th>
+            <th className="text-right font-semibold px-2 py-1">TTL</th>
+          </tr>
+        </thead>
+        <tbody>
+          {records.map((r) => (
+            <tr key={r.id} data-testid="dns-record-row" className="border-t border-gray-100">
+              <td className="px-2 py-1 font-mono"><DottedName name={r.name} /></td>
+              <td className="px-1 py-1 font-mono font-semibold text-gray-600">{r.type}</td>
+              <td className="px-1 py-1 font-mono [overflow-wrap:anywhere]">{r.type === 'MX' && `${r.priority ?? 10} `}<DottedName name={r.value} /></td>
+              <td className="px-2 py-1 font-mono text-right">{r.ttl}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

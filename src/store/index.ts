@@ -5,7 +5,9 @@ import type { NetNode, NetEdge, NodeData, PanelType, RouteEntry, MacEntry, ArpEn
 import { tapView } from '../simulation/tap'
 import { setAnimSpeed, setStepping, scaledHop } from '../simulation/packets'
 import * as clock from '../simulation/clock'
-import { makeDefaultData, normaliseNode } from '../simulation/defaults'
+import { makeDefaultData, normaliseNetwork } from '../simulation/defaults'
+import { clearAllDnsCaches } from '../simulation/dnsCache'
+import { primaryOf } from '../simulation/resolve'
 import type { Preset } from '../simulation/presets'
 
 const STORAGE_KEY = 'networx-state-v1'
@@ -23,6 +25,16 @@ function loadSpeed(): AnimSpeed {
   return 1
 }
 
+/** A secondary DNS server copies its primary's records while both are online (it keeps its copy otherwise). */
+function syncSecondaries(nodes: NetNode[]): NetNode[] {
+  return nodes.map((n) => {
+    if (n.data.deviceType !== 'dns' || !n.data.dnsPrimary || n.data.isOn === false) return n
+    const primary = primaryOf(n, nodes)
+    if (!primary || primary.data.isOn === false || primary.data.dnsRecords === n.data.dnsRecords) return n
+    return { ...n, data: { ...n.data, dnsRecords: primary.data.dnsRecords.map((r) => ({ ...r })) } }
+  })
+}
+
 let idCounter = 100
 function nextId(prefix: string) { return `${prefix}-${++idCounter}` }
 
@@ -32,7 +44,7 @@ function loadSaved(): { nodes: NetNode[]; edges: NetEdge[] } | null {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
     const parsed = JSON.parse(raw) as { nodes: NetNode[]; edges: NetEdge[] }
-    return { nodes: (parsed.nodes ?? []).map(normaliseNode), edges: parsed.edges ?? [] }
+    return { nodes: normaliseNetwork(parsed.nodes ?? [], parsed.edges ?? []), edges: parsed.edges ?? [] }
   } catch {
     return null
   }
@@ -182,16 +194,18 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
   addDevice: (type, position) => {
     const id = nextId(type)
     const data = makeDefaultData(type, id)
-    set((s) => ({
-      nodes: [...s.nodes, { id, type: 'device', position, data }],
-    }))
+    set((s) => {
+      // A new device gets the network's DNS server (and a new router hands it out), as on load
+      const [added] = normaliseNetwork([...s.nodes, { id, type: 'device', position, data }], s.edges).slice(-1)
+      return { nodes: [...s.nodes, added!] }
+    })
   },
 
   updateNodeData: (id, patch) =>
     set((s) => ({
-      nodes: s.nodes.map((n) =>
+      nodes: syncSecondaries(s.nodes.map((n) =>
         n.id === id ? { ...n, data: { ...n.data, ...patch } } : n,
-      ),
+      )),
     })),
 
   selectNode: (id) => set({ selectedNodeId: id }),
@@ -326,7 +340,8 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
     packets.forEach((packet) => {
       clock.after(packet.delayMs, () => {
         set((s) => ({ activePackets: [...s.activePackets, packet] }))
-        clock.after(packet.durationMs + 150, () => {
+        // A packet a firewall dropped stays a moment longer, so its ✕ can be seen
+        clock.after(packet.durationMs + (packet.dropped ? 1500 : 150), () => {
           set((s) => ({ activePackets: s.activePackets.filter((p) => p.id !== packet.id) }))
         })
       })
@@ -391,8 +406,9 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
   },
 
   loadPreset: (preset) => {
+    clearAllDnsCaches()
     set({
-      nodes: preset.nodes.map(normaliseNode),
+      nodes: normaliseNetwork(preset.nodes, preset.edges),
       edges: preset.edges,
       layoutVersion: get().layoutVersion + 1,
       recentConns: {},

@@ -70,7 +70,16 @@ DNS, FTP, SFTP, SSL, TLS, SMTP, POP3, IMAP”* (SE-12-03). It adds:
 - **Layer labels** by name (Application, Internet, Link) with the OSI equivalent, and DHCP/SSH capture records
 - **Subnets, default gateways and private addresses** decide what can reach what: a wrong mask or gateway breaks
   connectivity (with an ⓘ explaining why), and private 10.x / 172.16–31.x / 192.168.x addresses can't be reached
-  across the internet. DHCP only reaches a server on the same network segment
+  across the internet. DHCP only reaches a server on the same network segment. Mismatched subnet masks fail as
+  they do in real networks (the reply goes to the wrong place)
+- **traceroute and TTL** count only devices that route: switches never appear, and same-subnet replies keep TTL 64
+- **Firewall rules enforced** on firewalls and gateways (first match wins, inbound/outbound, stateful); a dropped
+  connection stops at the firewall with a red ✕ and the client times out
+- **DNS server setting** on every host (and handed out by DHCP), with an **Alternate DNS Server**; an unreachable DNS
+  server times out (three queries) instead of answering NXDOMAIN
+- **DNS records** A, AAAA, CNAME, MX, NS and TXT with TTLs, **`dig`** (`@server`, `+short`, `+trace` from the root),
+  `nslookup -type=…`, and a **DNS cache** on each device that honours TTL (`dnscache`, `flushdns`); a DNS server
+  can be a **secondary** that copies a primary's records
 - Vitest unit tests: `npm run test`; headless acceptance run: `npm run acceptance` (with `npm run preview` running)
 
 The original copyright and MIT licence are unchanged.

@@ -3,6 +3,7 @@ import type { TermContext, Lines } from '../context'
 import { resolveTarget, isResolveError, routeTo, type Resolved } from '../resolve'
 import { errnoText } from '../routing'
 import { playUnreachable } from '../unreachable'
+import { playLookup, playFailedServers } from '../lookup'
 import { info } from '../context'
 import { isListening, serviceById, type ServiceId } from '../services'
 import { type Leg, type Step, dnsConversation, newConversation, tcpRefused, runConversations } from '../exchange'
@@ -35,11 +36,12 @@ export function connectTo(
       ...(r.error === 'no-route' ? messages.noRoute('No route to host') : messages.unresolved),
       ...(r.explain ? [info(r.explain)] : []),
     ]
-    const dnsLeg = dnsConversation(r, ctx, lines)
-    return dnsLeg ? { lines: runConversations([dnsLeg], ctx).lines } : { lines }
+    return { lines: playLookup(r, ctx, lines).lines }
   }
-  const dnsLeg = dnsConversation(r, ctx)
-  const route = routeTo(r.node, r.ip, ctx)
+  const dnsConv = dnsConversation(r, ctx)
+  // DNS servers that never answered come first; the leg to the alternate waits for them
+  const dnsLeg = dnsConv ? { ...dnsConv, waitMs: playFailedServers(r, ctx) } : null
+  const route = routeTo(r.node, r.ip, ctx, { protocol: 'TCP', port })
   if (!route.ok || !r.node) {
     // Subnet, gateway or private-address rules stop it: show how far the SYN gets, then why
     const why = route.ok ? 'No route to host' : errnoText(route.failure)

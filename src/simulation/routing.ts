@@ -1,5 +1,10 @@
 import type { NetNode, NetEdge } from '../types'
 import { findPath, sameSubnet, subnetToCidr } from './network'
+import { isPrivateIp, privateRange } from './privateIp'
+import { firstBlock, blockedExplain, type Flow } from './firewall'
+
+export { isPrivateIp } from './privateIp'
+export type { Flow } from './firewall'
 
 /**
  * Can a packet from `src` reach `dstIp`, and can the reply come back? (Address rules on top of the
@@ -28,6 +33,7 @@ export type RouteFailure =
   | 'not-on-network'    // the last router isn't on the destination's subnet: it never hands it over
   | 'no-reply'          // the destination can't send the reply back
   | 'no-path'           // no cable path at all
+  | 'blocked'           // a firewall rule dropped it (Phase 3)
 
 export type Route =
   | { ok: true; path: string[] }
@@ -41,21 +47,6 @@ export type Route =
       /** A teaching note for the terminal (starts with ⓘ). */
       explain: string
     }
-
-const PRIVATE_RANGES: Array<[string, string]> = [
-  ['10.0.0.0', '255.0.0.0'],
-  ['172.16.0.0', '255.240.0.0'],
-  ['192.168.0.0', '255.255.0.0'],
-]
-
-export function isPrivateIp(ip: string): boolean {
-  return PRIVATE_RANGES.some(([net, mask]) => sameSubnet(ip, net, mask))
-}
-
-function privateRange(ip: string): string {
-  const r = PRIVATE_RANGES.find(([net, mask]) => sameSubnet(ip, net, mask))
-  return r ? `${r[0]}/${subnetToCidr(r[1])}` : ''
-}
 
 /** A node answers on its LAN address, and a router or gateway also on its WAN address. */
 export function nodeHasIp(n: NetNode, ip: string): boolean {
@@ -156,9 +147,24 @@ function crossesInternet(path: string[], nodes: NetNode[]): number {
 
 /**
  * Route from `src` to the device `dst` that answers on `dstIp` (null when no device has it).
- * The cloud node stands for every internet host.
+ * The cloud node stands for every internet host. With `flow` (the connection being started), the
+ * firewalls on the way check their rules too.
  */
-export function routeBetween(src: NetNode, dst: NetNode | null, dstIp: string, nodes: NetNode[], edges: NetEdge[]): Route {
+export function routeBetween(src: NetNode, dst: NetNode | null, dstIp: string, nodes: NetNode[], edges: NetEdge[], flow?: Flow): Route {
+  const route = addressRoute(src, dst, dstIp, nodes, edges)
+  if (!flow) return route
+  // How far the first packet travels: all the way, or as far as the address rules let it
+  const travelled = route.ok ? route.path
+    : (route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply') ? route.reach
+    : null
+  if (!travelled) return route
+  const block = firstBlock(travelled, flow, src.data.ip, dstIp, nodes, edges)
+  if (!block) return route
+  return { ok: false, failure: 'blocked', reach: travelled.slice(0, block.index + 1), explain: blockedExplain(block) }
+}
+
+/** The address rules alone (1–3 above). */
+function addressRoute(src: NetNode, dst: NetNode | null, dstIp: string, nodes: NetNode[], edges: NetEdge[]): Route {
   // 1. The sender's own decision
   let path: string[] | null
   if (HOST_TYPES.includes(src.data.deviceType)) {
@@ -202,13 +208,31 @@ export function routeBetween(src: NetNode, dst: NetNode | null, dstIp: string, n
     }
   }
 
-  // 3. The reply needs a way back (replies to a private sender come back through its NAT gateway)
+  // 3. The reply needs a way back (replies to a private sender come back through its NAT gateway).
+  //    The destination makes its own sending decision with its own mask — even when the request came
+  //    straight across the segment.
   if (HOST_TYPES.includes(dst.data.deviceType) && src.data.ip) {
     const back = nextHop(dst, src.data.ip, src, nodes, edges)
     if (!back.ok && back.failure !== 'no-address') {
       return {
         ok: false, failure: 'no-reply', reach: path,
         explain: `ⓘ ${dst.data.label} received the request but can't send the reply: ${back.explain.replace(/^ⓘ /, '')}`,
+      }
+    }
+    // The reply goes to the destination's gateway: the router that hands it to the sender must be on the sender's network
+    if (back.ok && back.firstHop.id !== src.id && HOST_TYPES.includes(src.data.deviceType)) {
+      const rest = findPath(back.firstHop.id, src.id, nodes, edges)
+      const replyPath = rest ? [...back.segment.slice(0, -1), ...rest] : null
+      const at = replyPath ? deliveringRouter(replyPath, nodes) : -1
+      const router = at >= 0 ? nodes.find((n) => n.id === replyPath![at]) : undefined
+      if (router && router.data.deviceType !== 'cloud' && !onNetwork(router, src.data.ip)) {
+        const gw = dst.data.gateway
+        const srcNet = `${src.data.ip}/${subnetToCidr(maskOf(src))}`
+        const dstNet = `${dst.data.ip}/${subnetToCidr(maskOf(dst))}`
+        const explain = direct
+          ? `ⓘ ${src.data.label} (${srcNet}) thinks ${dstIp} is on its own subnet, but ${dst.data.label} (${dstNet}) thinks ${src.data.ip} is on another one, so it sends the reply to its gateway ${gw} — which can't deliver it. Both ends of a subnet must use the same mask.`
+          : `ⓘ ${dst.data.label} received the request but can't send the reply: it sends it to its gateway ${gw}, and ${router.data.label} can't deliver to ${src.data.ip} — that address isn't on ${router.data.label}'s network.`
+        return { ok: false, failure: 'no-reply', reach: path, explain }
       }
     }
   }
@@ -231,6 +255,42 @@ function onNetwork(router: NetNode, ip: string): boolean {
   return !!router.data.wanIp && sameSubnet(router.data.wanIp, ip, '255.255.255.0')
 }
 
+/**
+ * Does the device at `path[i]` route the packet (forward it between networks, lowering its TTL)?
+ * Routers and firewalls always do; a home/office gateway only between its LAN and WAN sides — between
+ * two of its LAN devices it is just a switch. Switches, hubs and access points never do.
+ */
+export function isRoutingHop(path: string[], i: number, nodes: NetNode[]): boolean {
+  const type = (id: string | undefined) => nodes.find((n) => n.id === id)?.data.deviceType ?? ''
+  const t = type(path[i])
+  if (t === 'router' || t === 'firewall') return true
+  if (t !== 'gateway') return false
+  return ROUTING_TYPES.includes(type(path[i - 1])) || ROUTING_TYPES.includes(type(path[i + 1]))
+}
+
+/** Simulated internet backbone routers the Internet node stands for (traceroute shows them; each lowers the TTL). */
+export const INTERNET_HOPS = [
+  { ip: '195.68.128.1',  label: 'ISP Gateway'    },
+  { ip: '62.115.52.22',  label: 'Backbone router' },
+  { ip: '108.170.252.1', label: 'Exchange point'  },
+]
+
+/**
+ * The TTL a packet arrives with after travelling `path` from a sender that starts at 64:
+ * one less for every router on the way, and three less for the internet's backbone.
+ * A path ending at the Internet node (an internet host) crosses the backbone too.
+ */
+export function ttlAfter(path: string[], nodes: NetNode[], start = 64): number {
+  let ttl = start
+  for (let i = 1; i < path.length; i++) {
+    const last = i === path.length - 1
+    const t = nodes.find((n) => n.id === path[i])?.data.deviceType
+    if (t === 'cloud') ttl -= INTERNET_HOPS.length
+    else if (!last && isRoutingHop(path, i, nodes)) ttl -= 1
+  }
+  return ttl
+}
+
 /** Short system error text for a failure, as tools print it. */
 export function errnoText(failure: RouteFailure): string {
   switch (failure) {
@@ -239,6 +299,7 @@ export function errnoText(failure: RouteFailure): string {
     case 'private':
     case 'not-on-network':
     case 'no-reply': return 'Connection timed out'
+    case 'blocked': return 'Operation timed out'
     case 'no-address': return 'Network is unreachable'
     default: return 'No route to host'
   }

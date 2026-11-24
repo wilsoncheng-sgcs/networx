@@ -2,15 +2,17 @@ import type { TerminalLine, PacketAnim, PendingCapture } from '../types'
 import { nodeById, simulatePingRtt, subnetToCidr } from './network'
 import { type TermContext, type Lines, out, err, info, self, delayLines } from './context'
 import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
-import { resolveTarget, isResolveError, isIp, dnsServerFor, routeTo, nodeForIp, dnsUnreachableExplain, type Resolution } from './resolve'
-import { errnoText, findSegmentPath, type Route } from './routing'
+import { resolveTarget, isResolveError, isIp, dnsServersOf, defaultDnsServer, routeTo, nodeForIp, type Resolution } from './resolve'
+import { playLookup } from './lookup'
+import { errnoText, findSegmentPath, isRoutingHop, ttlAfter, INTERNET_HOPS, type Route } from './routing'
 import { playUnreachable } from './unreachable'
 import { tokenize } from './tokenize'
-import { dnsConversation, runConversations, hostKeyFingerprint, newConversation, tcpOpen, tcpRefused } from './exchange'
+import { runConversations, hostKeyFingerprint, newConversation, tcpOpen, tcpRefused } from './exchange'
 import { cmdCurl } from './protocols/web'
 import { cmdFtp, cmdSftp, sshHandshake, sshEncrypted } from './protocols/files'
 import { cmdPop3, cmdImap, cmdSmtp, cmdMail } from './protocols/mail'
 import { cmdSs, cmdNetstat } from './protocols/ports'
+import { cmdDig, cmdNslookup, cmdDnsCache, cmdFlushDns } from './protocols/dnsTools'
 import { isListening, servicesFor } from './services'
 
 export type { TermContext } from './context'
@@ -22,8 +24,7 @@ export { PUBLIC_IPS } from './resolve'
  * Returns when the answer arrives (ms), so later packets and lines can wait for it.
  */
 function animateDns(r: Resolution, ctx: TermContext): number {
-  const dnsLeg = dnsConversation(r, ctx)
-  return dnsLeg ? runConversations([dnsLeg], ctx).endMs : 0
+  return playLookup(r, ctx).endMs
 }
 
 /** The error line for a name that didn't resolve, and why when the address rules are the reason. */
@@ -36,16 +37,13 @@ function resolveErrorText(cmd: string, r: Resolution & { error: string }): strin
   switch (r.error) {
     case 'nxdomain': return `${cmd}: cannot resolve ${r.name}: Unknown host`
     case 'no-dns':   return `${cmd}: ${r.name}: Name or service not known`
+    case 'timeout':
+    case 'servfail': return `${cmd}: ${r.name}: Temporary failure in name resolution`
+    case 'nodata':
+    case 'no-ipv4':  return `${cmd}: ${r.name}: No address associated with hostname`
     default:         return `${cmd}: sendmsg: No route to host`
   }
 }
-
-// Simulated internet backbone hops shown in traceroute
-const INTERNET_HOPS = [
-  { ip: '195.68.128.1',  label: 'ISP Gateway'       },
-  { ip: '62.115.52.22',  label: 'Backbone router'    },
-  { ip: '108.170.252.1', label: 'Exchange point'     },
-]
 
 // ─── Command implementations ───────────────────────────────────────────────
 
@@ -57,12 +55,12 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
   const r = resolveTarget(target, ctx)
   // The client can't address a packet it hasn't resolved yet: ICMP waits for the DNS answer
   const afterDns = animateDns(r, ctx)
-  const lines: Lines = r.dnsServerIp ? [info(`Resolving ${target} via DNS (${r.dnsServerIp})…`)] : []
+  const lines: Lines = r.dnsServerIp ? [info(`Resolving ${target} via DNS (${r.dnsServerIp})…`)] : r.cached ? [info(`Resolving ${target} from this device's DNS cache (nothing sent)…`)] : []
 
   if (isResolveError(r)) return [...lines, ...resolveErrorLines('ping', r, afterDns)]
   const header = isIp(target) ? `PING ${target}: 56 data bytes` : `PING ${target} (${r.ip}): 56 data bytes`
   const dst = r.node
-  const route = routeTo(dst, r.ip, ctx)
+  const route = routeTo(dst, r.ip, ctx, { protocol: 'ICMP' })
   if (!route.ok) return [...lines, ...pingFailure(route, target, r.ip, header, src.data.ip, ctx, afterDns)]
   if (!dst) return [...lines, err('ping: sendmsg: No route to host', afterDns)]
   const path = route.path
@@ -75,6 +73,8 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
 
   const hops = path.length - 1
   const internet = dst.data.deviceType === 'cloud'
+  // The reply starts at TTL 64 and loses one at every router on the way back (switches don't count)
+  const replyTtl = ttlAfter([...path].reverse(), ctx.nodes)
 
   // Capture: four echo request/reply pairs; the first is the one animated
   const roundTrip = 2 * hops * scaledHop(HOP_MS)
@@ -90,7 +90,7 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
       { ...icmpBase, stepIndex: 2 * i, delayMs: t, srcIp: src.data.ip, dstIp: r.ip, ...out1, route: path,
         info: `Echo (ping) request  id=0x0001, seq=${i}, ttl=64` },
       { ...icmpBase, stepIndex: 2 * i + 1, delayMs: t + roundTrip / 2, srcIp: r.ip, dstIp: src.data.ip, ...back1, route: [...path].reverse(),
-        info: `Echo (ping) reply    id=0x0001, seq=${i}, ttl=${internet ? 52 : 64 - hops}` },
+        info: `Echo (ping) reply    id=0x0001, seq=${i}, ttl=${replyTtl}` },
     )
   }
   ctx.dispatchCaptures?.(captures)
@@ -99,7 +99,7 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
   for (let i = 0; i < 4; i++) {
     const rtt = internet ? 20 + hops * 8 + Math.floor(Math.random() * 15) : simulatePingRtt(hops)
     rtts.push(rtt)
-    body.push(out(`64 bytes from ${r.ip}: icmp_seq=${i} ttl=${internet ? 52 : 64 - hops} time=${rtt} ms`))
+    body.push(out(`64 bytes from ${r.ip}: icmp_seq=${i} ttl=${replyTtl} time=${rtt} ms`))
   }
   const min = Math.min(...rtts), max = Math.max(...rtts)
   const avg = Math.round(rtts.reduce((a, b) => a + b, 0) / rtts.length)
@@ -129,6 +129,7 @@ function pingFailure(route: Extract<Route, { ok: false }>, target: string, ip: s
     case 'private':
     case 'not-on-network':
     case 'no-reply':
+    case 'blocked':
       body = [out(header), ...[0, 1, 2, 3].map((i) => out(`Request timeout for icmp_seq ${i}`)), ...stats(4), ...explain]
       break
     default:
@@ -137,17 +138,39 @@ function pingFailure(route: Extract<Route, { ok: false }>, target: string, ip: s
   return playUnreachable(route, { kind: 'icmp' }, ip, ctx, body, startMs).lines
 }
 
-/** One traceroute line per device after the first on `path`, numbered from `first`. */
-function tracerouteHops(path: string[], ctx: TermContext, first = 1): Lines {
-  const WAN_SIDE_TYPES = ['router', 'gateway', 'cloud', 'firewall']
-  return path.slice(1).map((nodeId, i) => {
-    const node = nodeById(nodeId, ctx.nodes)
-    const prevNode = nodeById(path[i]!, ctx.nodes)
-    const fromWan = WAN_SIDE_TYPES.includes(prevNode?.data.deviceType ?? '')
-    const ip = (fromWan && node?.data.wanIp) ? node.data.wanIp : (node?.data.ip || node?.data.label || '*')
-    const rtt = simulatePingRtt(i + 1)
-    return out(` ${first + i}  ${ip} (${node?.data.label ?? ''})  ${rtt} ms  ${rtt + 1} ms  ${rtt} ms`)
-  })
+/**
+ * traceroute's lines for `path`: one per device that routes (each one lowers the TTL, so each one
+ * answers a probe), addressed by the interface the probe arrived on; the Internet node as its backbone
+ * routers. Switches, hubs and access points never appear. With `dst`, the last line is the destination;
+ * without it the probes die at the end of `path` (and an Internet node there drops them at the ISP).
+ */
+function tracerouteHops(path: string[], ctx: TermContext, dst?: { ip: string; label: string }, crossedInternet = false): Lines {
+  const lines: Lines = []
+  let n = 0
+  let pastInternet = false
+  const hop = (ip: string, label: string) => {
+    n++
+    const rtt = pastInternet ? 15 + n * 4 + Math.floor(Math.random() * 4) : simulatePingRtt(n)
+    lines.push(out(` ${n}  ${ip} (${label})  ${rtt} ms  ${rtt + 1} ms  ${rtt} ms`))
+  }
+  for (let i = 1; i < path.length; i++) {
+    const node = nodeById(path[i]!, ctx.nodes)
+    if (!node) continue
+    const last = i === path.length - 1
+    if (node.data.deviceType === 'cloud') {
+      const backbone = last && !dst && !crossedInternet ? INTERNET_HOPS.slice(0, 1) : INTERNET_HOPS
+      backbone.forEach((h) => hop(h.ip, h.label))
+      pastInternet = true
+      if (last && dst) hop(dst.ip, dst.label)
+      continue
+    }
+    if (last && dst) { hop(dst.ip, node.data.label); continue }
+    if (!isRoutingHop(path, i, ctx.nodes)) continue
+    const prev = nodeById(path[i - 1]!, ctx.nodes)
+    const fromWan = ['router', 'gateway', 'cloud', 'firewall'].includes(prev?.data.deviceType ?? '')
+    hop((fromWan && node.data.wanIp) ? node.data.wanIp : (node.data.ip || '*'), node.data.label)
+  }
+  return lines
 }
 
 function cmdTraceroute(args: string[], ctx: TermContext): Lines {
@@ -157,25 +180,24 @@ function cmdTraceroute(args: string[], ctx: TermContext): Lines {
   const src = self(ctx)
   const r = resolveTarget(target, ctx)
   const afterDns = animateDns(r, ctx)
-  const lines: Lines = r.dnsServerIp ? [info(`Resolving ${target} via DNS (${r.dnsServerIp})…`)] : []
+  const lines: Lines = r.dnsServerIp ? [info(`Resolving ${target} via DNS (${r.dnsServerIp})…`)] : r.cached ? [info(`Resolving ${target} from this device's DNS cache (nothing sent)…`)] : []
 
   if (isResolveError(r)) return [...lines, ...resolveErrorLines('traceroute', r, afterDns)]
   const dst = r.node
   const header = out(`traceroute to ${target} (${r.ip}), 30 hops max, 60 byte packets`)
-  const route = routeTo(dst, r.ip, ctx)
+  const route = routeTo(dst, r.ip, ctx, { protocol: 'ICMP' })
   if (!route.ok) {
     const explain = route.explain ? [info(route.explain)] : []
     const silent = (from: number) => [0, 1, 2].map((i) => out(` ${from + i}  * * *`))
     let body: Lines
     if (route.failure === 'no-address' || route.failure === 'net-unreachable') {
       body = [err('traceroute: sendto: Network is unreachable'), ...explain]
-    } else if ((route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply') && route.reach) {
-      // The devices on the way still answer; after that, silence
-      const answered = route.failure === 'no-reply' ? route.reach.slice(0, -1) : route.reach
-      const cloudAt = answered.findIndex((id) => nodeById(id, ctx.nodes)?.data.deviceType === 'cloud')
-      const hops = cloudAt > 0
-        ? [...tracerouteHops(answered.slice(0, cloudAt), ctx), out(` ${cloudAt}  ${INTERNET_HOPS[0]!.ip} (${INTERNET_HOPS[0]!.label})  ${12 + cloudAt * 3} ms  ${13 + cloudAt * 3} ms  ${12 + cloudAt * 3} ms`)]
-        : tracerouteHops(answered, ctx)
+    } else if ((route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply' || route.failure === 'blocked') && route.reach) {
+      // The devices on the way still answer; after that, silence (a firewall that drops a probe doesn't answer it)
+      const beyond = route.failure === 'no-reply' || route.failure === 'blocked'
+      const answered = beyond ? route.reach.slice(0, -1) : route.reach
+      // Dropped at the ISP (private, not-on-network) vs carried across the internet to a device beyond it
+      const hops = tracerouteHops(answered, ctx, undefined, beyond)
       body = [header, ...hops, ...silent(hops.length + 1), ...explain]
     } else {
       body = [header, ...silent(1), ...explain]
@@ -187,24 +209,16 @@ function cmdTraceroute(args: string[], ctx: TermContext): Lines {
 
   ctx.dispatchPackets?.(startAfter(makePacketsWithArp(src, dst, path, ctx, 'ICMP', 'ICMP'), afterDns))
 
-  const body: Lines = [header, ...tracerouteHops(path, ctx)]
-  let hopNum = path.length
-
-  if (dst.data.deviceType === 'cloud') {
-    // Simulated internet backbone hops, then the host itself
-    INTERNET_HOPS.forEach((hop, i) => {
-      const rtt = 15 + hopNum * 4 + i * 3 + Math.floor(Math.random() * 4)
-      body.push(out(` ${hopNum}  ${hop.ip} (${hop.label})  ${rtt} ms  ${rtt + 2} ms  ${rtt + 1} ms`))
-      hopNum++
-    })
-    const finalRtt = 30 + Math.floor(Math.random() * 10)
-    body.push(out(` ${hopNum}  ${r.ip} (${target})  ${finalRtt} ms  ${finalRtt + 1} ms  ${finalRtt} ms`))
-  }
+  const label = dst.data.deviceType === 'cloud' ? target : dst.data.label
+  const body: Lines = [header, ...tracerouteHops(path, ctx, { ip: r.ip, label })]
   return [...lines, ...delayLines(body, afterDns)]
 }
 
 function cmdIpconfig(args: string[], ctx: TermContext): Lines {
   if (args[0] === '/renew') return cmdDhclient([], ctx)
+  // Windows: ipconfig /displaydns and /flushdns work on the DNS cache
+  if (args[0]?.toLowerCase() === '/displaydns') return cmdDnsCache(ctx)
+  if (args[0]?.toLowerCase() === '/flushdns') return [...cmdFlushDns(ctx, true), out('Successfully flushed the DNS Resolver Cache.')]
   const node = self(ctx)
   const { ip, wanIp, subnet, gateway, mac } = node.data
   const cidr = subnet ? subnetToCidr(subnet) : 24
@@ -227,6 +241,7 @@ function cmdIpconfig(args: string[], ctx: TermContext): Lines {
     out(`   IPv4 Address . . . . : ${ip || '(not set)'}`),
     out(`   Subnet Mask  . . . . : ${subnet || '255.255.255.0'} (/${cidr})`),
     out(`   Default Gateway  . . : ${gateway || '(not set)'}`),
+    ...(dnsServersOf(ctx).length ? dnsServersOf(ctx) : ['(not set)']).map((ip, i) => out(i ? `                          ${ip}` : `   DNS Servers  . . . . : ${ip}`)),
     out(`   Physical Address . . : ${mac}`),
   ]
 }
@@ -254,45 +269,10 @@ function cmdIfconfig(_args: string[], ctx: TermContext): Lines {
     out(`        inet6 fe80::1  prefixlen 64  scopeid 0x20<link>`),
     out(`        ether ${mac}  txqueuelen 1000  (Ethernet)`),
     out(`        Gateway: ${gateway || '(not set)'} (/${cidr})`),
-  ]
-}
-
-function cmdNslookup(args: string[], ctx: TermContext): Lines {
-  const domain = args[0]
-  if (!domain) return [err('Usage: nslookup <domain>')]
-
-  if (isIp(domain)) {
-    // Reverse lookup needs PTR records, which Networx's DNS server doesn't hold
-    const server = dnsServerFor(ctx)
-    if (!server) return [out('Server:   (none)'), out(''), err(';; connection timed out; no servers could be reached'), ...(dnsUnreachableExplain(ctx) ? [info(dnsUnreachableExplain(ctx)!)] : [])]
-    const arpa = `${domain.split('.').reverse().join('.')}.in-addr.arpa`
-    return [
-      out(`Server:   ${server.ip}`),
-      out(`Address:  ${server.ip}#53`),
-      out(''),
-      out(`** server can't find ${arpa}: NXDOMAIN`),
-    ]
-  }
-
-  const r = resolveTarget(domain, ctx)
-  const afterDns = animateDns(r, ctx)
-
-  if (!r.dnsServerIp) {
-    return [out('Server:   (none)'), out(''), err(';; connection timed out; no servers could be reached'), ...(dnsUnreachableExplain(ctx) ? [info(dnsUnreachableExplain(ctx)!)] : [])]
-  }
-
-  const lines: Lines = [
-    out(`Server:   ${r.dnsServerIp}`),
-    out(`Address:  ${r.dnsServerIp}#53`),
     out(''),
+    out('# /etc/resolv.conf'),
+    ...(dnsServersOf(ctx).length ? dnsServersOf(ctx).map((ip) => out(`nameserver ${ip}`)) : [out('# (no DNS server set)')]),
   ]
-  if (isResolveError(r)) {
-    lines.push(out(`** server can't find ${domain}: NXDOMAIN`))
-  } else {
-    if (!r.authoritative) lines.push(out('Non-authoritative answer:'))
-    lines.push(out(`Name:     ${domain}`), out(`Address:  ${r.ip}`))
-  }
-  return delayLines(lines, afterDns)
 }
 
 function cmdArp(args: string[], ctx: TermContext): Lines {
@@ -343,7 +323,7 @@ function cmdSsh(args: string[], ctx: TermContext): Lines {
   if (!target) return [err('Usage: ssh <ip-address>')]
   const dst = nodeForIp(target, ctx)
   const src = self(ctx)
-  const route = routeTo(dst, target, ctx)
+  const route = routeTo(dst, target, ctx, { protocol: 'TCP', port: 22 })
   if (!route.ok) {
     const lines = [err(`ssh: connect to host ${target} port 22: ${errnoText(route.failure)}`), ...(route.explain ? [info(route.explain)] : [])]
     return playUnreachable(route, { kind: 'tcp', port: 22 }, target, ctx, lines).lines
@@ -426,7 +406,9 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
       ...leg(path, ctx.edges, 'UDP', 'ACK',      3 * legMs, true), // router → client
     ]
     ctx.dispatchPackets?.(dhcpPackets)
-    ctx.dispatchCaptures?.(dhcpCaptures(src.data.mac, router, assignedIp, `${prefix}.1`, path, ctx, legMs))
+    // The DNS server the router hands out (its setting, else the network's DNS server)
+    const dns = typeof router.data.dhcpDns === 'string' ? router.data.dhcpDns : defaultDnsServer(router, ctx.nodes, ctx.edges)
+    ctx.dispatchCaptures?.(dhcpCaptures(src.data.mac, router, assignedIp, `${prefix}.1`, dns, path, ctx, legMs))
 
     // Update the node's IP address when the ACK arrives
     const ackMs = 4 * legMs
@@ -434,6 +416,7 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
       ip: assignedIp,
       gateway: `${prefix}.1`,
       subnet: '255.255.255.0',
+      dnsServer: dns,
     })
     if (ctx.schedule) ctx.schedule(ackMs, apply)
     else apply()
@@ -446,6 +429,7 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
       { ...out(''), delayMs: ackMs },
       { ...out(`inet ${assignedIp}/24 brd ${prefix}.255 scope global dynamic eth0`), delayMs: ackMs },
       { ...out(`   valid_lft ${LEASE_SECONDS}sec preferred_lft ${LEASE_SECONDS}sec`), delayMs: ackMs },
+      { ...out(`   gateway ${prefix}.1  DNS server ${dns || '(none)'}`), delayMs: ackMs },
       { ...info('ⓘ DHCP runs over UDP: the client sends from port 68 to port 67. It has no address yet, so it sends from 0.0.0.0 to the broadcast address 255.255.255.255.'), delayMs: ackMs },
     ]
   }
@@ -462,6 +446,7 @@ function dhcpCaptures(
   router: { data: { ip: string; mac: string } },
   offered: string,
   gateway: string,
+  dns: string,
   path: string[],
   ctx: TermContext,
   legMs: number,
@@ -488,9 +473,9 @@ function dhcpCaptures(
   })
   return [
     rec(0, true, 'Discover', `DHCP Discover\n  client MAC: ${clientMac}\n  asks: any DHCP server, please offer me an address`),
-    rec(1, false, 'Offer', `DHCP Offer\n  your address: ${offered}\n  subnet mask: 255.255.255.0\n  router (default gateway): ${gateway}\n  lease time: ${LEASE_SECONDS} s\n  DHCP server: ${router.data.ip}`),
+    rec(1, false, 'Offer', `DHCP Offer\n  your address: ${offered}\n  subnet mask: 255.255.255.0\n  router (default gateway): ${gateway}\n  domain name server: ${dns}\n  lease time: ${LEASE_SECONDS} s\n  DHCP server: ${router.data.ip}`),
     rec(2, true, 'Request', `DHCP Request\n  requested address: ${offered}\n  DHCP server: ${router.data.ip}`),
-    rec(3, false, 'ACK', `DHCP ACK\n  your address: ${offered}\n  lease time: ${LEASE_SECONDS} s`),
+    rec(3, false, 'ACK', `DHCP ACK\n  your address: ${offered}\n  subnet mask: 255.255.255.0\n  router (default gateway): ${gateway}\n  domain name server: ${dns}\n  lease time: ${LEASE_SECONDS} s`),
   ]
 }
 
@@ -504,7 +489,10 @@ function cmdHelp(): Lines {
     out('  route                          Show routing table'),
     out('  dhclient / ipconfig /renew     Get an IP address by DHCP'),
     out('Name lookup'),
-    out('  nslookup <name>                Ask the DNS server for an address'),
+    out('  nslookup [-type=mx] <name>     Ask the DNS server for an address (or other records)'),
+    out('  dig [@server] <name> [type]    Ask the DNS server, showing the whole answer'),
+    out('       types: A AAAA CNAME MX NS TXT    +short  values only    +trace  every step from the root'),
+    out('  dnscache / flushdns            Show / empty this device\'s DNS cache'),
     out('Web'),
     out('  curl [-v] http(s)://<host>     Fetch a page (-v shows every step)'),
     out('       -I  headers only     -k  carry on past a bad certificate'),
@@ -543,6 +531,13 @@ export function runCommand(raw: string, baseCtx: TermContext): TerminalLine[] {
     case 'ipconfig': return cmdIpconfig(args, ctx)
     case 'ifconfig': return cmdIfconfig(args, ctx)
     case 'nslookup': return cmdNslookup(args, ctx)
+    case 'dig': return cmdDig(args, ctx)
+    case 'dnscache': return cmdDnsCache(ctx)
+    case 'flushdns': return cmdFlushDns(ctx)
+    case 'sudo':
+      // macOS: sudo dscacheutil -flushcache empties the DNS cache and prints nothing
+      if (args[0]?.toLowerCase() === 'dscacheutil' && args[1] === '-flushcache') return cmdFlushDns(ctx, true)
+      return args.length ? runCommand(args.join(' '), baseCtx) : [err('usage: sudo <command>')]
     case 'arp': return cmdArp(args, ctx)
     case 'netstat': return cmdNetstat(args, ctx)
     case 'ss': return cmdSs(args, ctx)

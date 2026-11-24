@@ -477,12 +477,12 @@ function relayTarget(server: NetNode, domain: string, ctx: TermContext): RelayTa
   const host = `mail.${domain}`
   const local = ctx.nodes.find((n) => n.id !== server.id && n.data.deviceType === 'mail' && n.data.mailDomain?.toLowerCase() === domain)
   if (local) {
-    const route = routeBetween(server, local, local.data.ip, ctx.nodes, ctx.edges)
+    const route = routeBetween(server, local, local.data.ip, ctx.nodes, ctx.edges, { protocol: 'TCP', port: 25 })
     return route.ok ? { node: local, ip: local.data.ip, host, path: route.path } : null
   }
   for (const cloud of ctx.nodes.filter((n) => n.data.deviceType === 'cloud' && n.data.isOn)) {
     const ip = internetMailIp(domain)
-    const route = routeBetween(server, cloud, ip, ctx.nodes, ctx.edges)
+    const route = routeBetween(server, cloud, ip, ctx.nodes, ctx.edges, { protocol: 'TCP', port: 25 })
     if (route.ok) return { node: cloud, ip, host, path: route.path }
   }
   return null

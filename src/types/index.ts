@@ -38,10 +38,18 @@ export interface ArpEntry {
   iface: string
 }
 
+export type DnsRecordType = 'A' | 'AAAA' | 'CNAME' | 'MX' | 'NS' | 'TXT'
+
 export interface DnsRecord {
   id: string
-  hostname: string
-  ip: string
+  name: string
+  type: DnsRecordType
+  /** A: IPv4 address · AAAA: IPv6 address · CNAME/MX/NS: a host name · TXT: text */
+  value: string
+  /** Seconds a resolver may cache this record. */
+  ttl: number
+  /** MX only: lower is tried first. */
+  priority?: number
 }
 
 export interface FirewallRule {
@@ -108,6 +116,11 @@ export interface NodeData extends Record<string, unknown> {
   mailDomain?: string                               // mail server, e.g. 'careconnect.example'
   mailboxes?: Mailbox[]                             // mail server
   localMail?: MailMessage[]                         // any client: mail downloaded by POP3
+  // ── Phase 4 ──
+  dnsServer?: string                                // hosts: the DNS server this device asks ('' = none)
+  dhcpDns?: string                                  // routers/gateways: the DNS server DHCP hands to clients
+  dnsAlternate?: string                             // hosts: asked when the DNS server doesn't answer (B6)
+  dnsPrimary?: string                               // DNS servers: a secondary copies this primary's records (B6)
 }
 
 export type NetNode = Node<NodeData>
@@ -123,6 +136,8 @@ export interface PacketAnim {
   delayMs: number
   durationMs: number
   reverse?: boolean
+  /** Dropped by a firewall at the end of this hop: shown with a red ✕. */
+  dropped?: boolean
 }
 
 export type AnimSpeed = 0.5 | 1 | 3 | 'instant'
