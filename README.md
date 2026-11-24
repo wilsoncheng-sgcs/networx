@@ -80,6 +80,11 @@ DNS, FTP, SFTP, SSL, TLS, SMTP, POP3, IMAP”* (SE-12-03). It adds:
 - **DNS records** A, AAAA, CNAME, MX, NS and TXT with TTLs, **`dig`** (`@server`, `+short`, `+trace` from the root),
   `nslookup -type=…`, and a **DNS cache** on each device that honours TTL (`dnscache`, `flushdns`); a DNS server
   can be a **secondary** that copies a primary's records
+- **DHCP** hands out the router's own address as the default gateway and its own subnet mask; hosts choose
+  **Manual** or **Automatic (DHCP)** addressing in Configure
+- **ISP routing table** on the Internet node: a public network behind a router is reachable from the internet only
+  while a route to it is announced (Announce / Withdraw on the router's Routing tab); private ranges are never
+  carried. With no route, packets stop at the ISP and the ⓘ names the missing route; the reply needs a route back too
 - Vitest unit tests: `npm run test`; headless acceptance run: `npm run acceptance` (with `npm run preview` running)
 
 The original copyright and MIT licence are unchanged.

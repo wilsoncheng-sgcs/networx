@@ -2,6 +2,7 @@ import type { NetNode, NetEdge } from '../types'
 import { findPath, sameSubnet, subnetToCidr } from './network'
 import { isPrivateIp, privateRange } from './privateIp'
 import { firstBlock, blockedExplain, type Flow } from './firewall'
+import { ispCheck } from './isp'
 
 export { isPrivateIp } from './privateIp'
 export type { Flow } from './firewall'
@@ -34,6 +35,12 @@ export type RouteFailure =
   | 'no-reply'          // the destination can't send the reply back
   | 'no-path'           // no cable path at all
   | 'blocked'           // a firewall rule dropped it (Phase 3)
+  | 'no-route'          // the ISP has no route to a public network: dropped at the internet
+
+/** Failures where the packets still travel part of the way (`reach`), and the sender times out. */
+export function travelsPartWay(failure: RouteFailure): boolean {
+  return failure === 'private' || failure === 'not-on-network' || failure === 'no-reply' || failure === 'blocked' || failure === 'no-route'
+}
 
 export type Route =
   | { ok: true; path: string[] }
@@ -155,7 +162,7 @@ export function routeBetween(src: NetNode, dst: NetNode | null, dstIp: string, n
   if (!flow) return route
   // How far the first packet travels: all the way, or as far as the address rules let it
   const travelled = route.ok ? route.path
-    : (route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply') ? route.reach
+    : (travelsPartWay(route.failure) && route.failure !== 'blocked') ? route.reach
     : null
   if (!travelled) return route
   const block = firstBlock(travelled, flow, src.data.ip, dstIp, nodes, edges)
@@ -186,6 +193,10 @@ function addressRoute(src: NetNode, dst: NetNode | null, dstIp: string, nodes: N
       explain: `ⓘ ${dstIp} is a private address (${privateRange(dstIp)}): it only exists inside its own network. Internet routers drop packets addressed to it, and the network's NAT gateway only lets replies back in — so nothing outside can start a connection to ${dst.data.label}. From outside, use a public address.`,
     }
   }
+
+  // 2a. A public network is reachable across the internet only if the ISP has a route to it (and back)
+  const isp = cloudAt >= 0 ? ispCheck(path, cloudAt + 1, src.data.ip, dstIp, dst.data.label, nodes) : null
+  if (isp?.direction === 'to') return { ok: false, failure: 'no-route', reach: path.slice(0, cloudAt + 2), explain: isp.explain }
 
   // 2b. The router that hands the packet over must itself be on the destination's subnet — a device
   //     plugged into a gateway with an address from another network isn't reached
@@ -236,6 +247,7 @@ function addressRoute(src: NetNode, dst: NetNode | null, dstIp: string, nodes: N
       }
     }
   }
+  if (isp?.direction === 'back') return { ok: false, failure: 'no-reply', reach: path, explain: isp.explain }
   return { ok: true, path }
 }
 
@@ -298,7 +310,8 @@ export function errnoText(failure: RouteFailure): string {
     case 'host-unreachable': return 'No route to host'
     case 'private':
     case 'not-on-network':
-    case 'no-reply': return 'Connection timed out'
+    case 'no-reply':
+    case 'no-route': return 'Connection timed out'
     case 'blocked': return 'Operation timed out'
     case 'no-address': return 'Network is unreachable'
     default: return 'No route to host'

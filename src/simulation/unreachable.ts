@@ -3,7 +3,7 @@ import type { TermContext } from './context'
 import { nodeById } from './network'
 import { HOP_MS, scaledHop, leg, firstHopMacs, nextBatchId } from './packets'
 import { CONV_HOP_MS, ephemeralPort } from './exchange'
-import type { Route } from './routing'
+import { travelsPartWay, type Route } from './routing'
 import type { DnsRecordType } from '../types'
 import { queryInfo, newTransactionId, messageSize } from './dns'
 
@@ -60,9 +60,9 @@ export function playUnreachable(
     return { lines: at(end), endMs: end }
   }
 
-  const travels = route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply' || route.failure === 'blocked'
-  // A firewall's drop is marked with a red ✕ where the packet stops
-  const drop = (pkts: PacketAnim[]) => (route.failure === 'blocked' && pkts.length ? [...pkts.slice(0, -1), { ...pkts[pkts.length - 1]!, dropped: true }] : pkts)
+  const travels = travelsPartWay(route.failure)
+  // A firewall's drop, or the ISP's (no route), is marked with a red ✕ where the packet stops
+  const drop = (pkts: PacketAnim[]) => ((route.failure === 'blocked' || route.failure === 'no-route') && pkts.length ? [...pkts.slice(0, -1), { ...pkts[pkts.length - 1]!, dropped: true }] : pkts)
   if (travels && route.reach && route.reach.length > 1) {
     const hop = scaledHop(CONV_HOP_MS)
     const legMs = (route.reach.length - 1) * hop

@@ -1028,6 +1028,55 @@ await scenario(32, 'Configure: Manual or Automatic (DHCP) address', async () => 
   await loadCareConnect()
 })
 
+await scenario(33, 'ISP routes: a public network is reachable only while it is announced', async () => {
+  await loadCareConnect()
+  await selectNode('Internet')
+  await openTab('Configure')
+  await openTab('Routing')
+  const ispRows = aside().getByTestId('isp-route-row')
+  const first = (await ispRows.count()) === 1 ? await ispRows.first().innerText() : ''
+  check('the Internet node lists 203.0.113.0/24 → 198.51.100.1 (CareConnect Router)',
+    first.includes('203.0.113.0/24') && first.includes('198.51.100.1 (CareConnect Router)'), first)
+  await shot('33a-isp-table')
+
+  // Withdraw it from the CareConnect Router's Routing tab
+  await selectNode('CareConnect Router')
+  await openTab('Configure')
+  await openTab('Routing')
+  const status = () => aside().getByTestId('announce-status').innerText()
+  check('router: announced', (await status()).startsWith('Announced'), await status())
+  await aside().getByTestId('withdraw-button').click()
+  check('router: not announced after Withdraw', (await status()).startsWith('Not announced'), await status())
+  await shot('33c-not-announced')
+  await terminalOn("Patient's Laptop")
+  await clearTerm()
+  await cmd('curl http://203.0.113.80')
+  const o = await output()
+  check('curl times out', o.includes('curl: (28) Failed to connect to 203.0.113.80 port 80'))
+  check('the ⓘ names the missing route', o.includes('no ISP has a route for 203.0.113.0/24'))
+  await shot('33b-no-route')
+
+  // Add it back by hand in the Internet node's table; a private network is refused
+  await selectNode('Internet')
+  await openTab('Configure')
+  await openTab('Routing')
+  const addRoute = async (network, hop) => {
+    await aside().getByTestId('isp-network').fill(network)
+    await aside().getByTestId('isp-next-hop').fill(hop)
+    await aside().getByTestId('isp-add').click()
+  }
+  await addRoute('10.0.0.0/24', '198.51.100.77')
+  const refusal = await aside().getByTestId('isp-error').innerText().catch(() => '')
+  check('a private network is refused', refusal.includes('is private'), refusal)
+  await addRoute('203.0.113.0/24', '198.51.100.1')
+  check('the route is back', (await ispRows.count()) === 1)
+  await terminalOn("Patient's Laptop")
+  await clearTerm()
+  await cmd('curl http://203.0.113.80')
+  check('curl works again', (await output()).includes('CareConnect Medical Centre'))
+  await loadCareConnect()
+})
+
 await scenario(13, 'Layout at 1280×800 and 1440×900', async () => {
   if (!(await page.getByTestId('capture-drawer').isVisible().catch(() => false))) await page.getByTestId('capture-toggle').click()
   for (const [w, h] of [[1280, 800], [1440, 900]]) {

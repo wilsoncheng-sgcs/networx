@@ -2,6 +2,7 @@ import type { NodeData, DeviceType, NetNode, NetEdge, Mailbox, StoredFile } from
 import { defaultDnsServer, PUBLIC_RESOLVER_IP } from './resolve'
 import { HOST_TYPES } from './routing'
 import { normaliseRecord } from './dns'
+import { defaultIspRoutes } from './isp'
 
 let ipCounter = 10
 
@@ -161,6 +162,8 @@ export function makeDefaultData(type: DeviceType, id: string): NodeData {
       base.subnet = ''
       base.gateway = ''
       base.notes = 'Represents the public internet / ISP. Connect a router\'s WAN port here.'
+      // The ISP's routes: a public network behind a router is reachable only once it is announced here
+      base.ispRoutes = []
       break
     case 'file':
       base.ip = nextIp()
@@ -205,7 +208,10 @@ export function normaliseNode(node: NetNode): NetNode {
  * else none), and the DNS server a router or gateway hands out by DHCP.
  */
 export function normaliseNetwork(nodes: NetNode[], edges: NetEdge[]): NetNode[] {
-  const all = nodes.map(normaliseNode)
+  // An Internet node saved before ISP routing tables gets the routes that keep it working as it did
+  const noTable = new Set(nodes.filter((n) => n.data?.deviceType === 'cloud' && !Array.isArray(n.data.ispRoutes)).map((n) => n.id))
+  const normalised = nodes.map(normaliseNode)
+  const all = normalised.map((n) => noTable.has(n.id) ? { ...n, data: { ...n.data, ispRoutes: defaultIspRoutes(n, normalised, edges) } } : n)
   const dnsNode = all.find((n) => n.data.deviceType === 'dns' && n.data.ip)
   const forClients = dnsNode?.data.ip ?? (all.some((n) => n.data.deviceType === 'cloud') ? PUBLIC_RESOLVER_IP : '')
   return all.map((n) => {
