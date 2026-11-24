@@ -96,3 +96,25 @@ describe('A2 — traceroute shows only devices that route', () => {
   })
 })
 
+describe('A3 — TTL drops only at routers', () => {
+  const ttls = (text: string) => [...text.matchAll(/ttl=(\d+)/g)].map((m) => Number(m[1]))
+
+  it("same subnet: the reply arrives with ttl=64", () => {
+    const { text, captures } = run('docpc', 'ping 10.0.0.11')
+    expect(new Set(ttls(text))).toEqual(new Set([64]))
+    const replies = captures.filter((c) => c.info.startsWith('Echo (ping) reply'))
+    expect(replies.every((c) => c.info.endsWith('ttl=64'))).toBe(true)
+  })
+
+  it('across routers: one less per router, three less for the internet backbone', () => {
+    // CareConnect Router (1) + backbone (3) + Clinic Gateway routing WAN → LAN (1)
+    expect(new Set(ttls(run('docpc', 'ping 203.0.113.80').text))).toEqual(new Set([59]))
+    // Request rows still leave with ttl=64
+    const req = run('docpc', 'ping 203.0.113.80').captures.filter((c) => c.info.startsWith('Echo (ping) request'))
+    expect(req.every((c) => c.info.endsWith('ttl=64'))).toBe(true)
+  })
+
+  it('the gateway itself is one hop away: ttl=64', () => {
+    expect(new Set(ttls(run('reception', 'ping 10.0.0.1').text))).toEqual(new Set([64]))
+  })
+})

@@ -4,7 +4,7 @@ import { type TermContext, type Lines, out, err, info, self, delayLines } from '
 import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
 import { resolveTarget, isResolveError, isIp, dnsServerIpOf, routeTo, nodeForIp, type Resolution } from './resolve'
 import { playLookup } from './lookup'
-import { errnoText, findSegmentPath, isRoutingHop, INTERNET_HOPS, type Route } from './routing'
+import { errnoText, findSegmentPath, isRoutingHop, ttlAfter, INTERNET_HOPS, type Route } from './routing'
 import { playUnreachable } from './unreachable'
 import { tokenize } from './tokenize'
 import { runConversations, hostKeyFingerprint, newConversation, tcpOpen, tcpRefused } from './exchange'
@@ -69,6 +69,8 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
 
   const hops = path.length - 1
   const internet = dst.data.deviceType === 'cloud'
+  // The reply starts at TTL 64 and loses one at every router on the way back (switches don't count)
+  const replyTtl = ttlAfter([...path].reverse(), ctx.nodes)
 
   // Capture: four echo request/reply pairs; the first is the one animated
   const roundTrip = 2 * hops * scaledHop(HOP_MS)
@@ -84,7 +86,7 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
       { ...icmpBase, stepIndex: 2 * i, delayMs: t, srcIp: src.data.ip, dstIp: r.ip, ...out1, route: path,
         info: `Echo (ping) request  id=0x0001, seq=${i}, ttl=64` },
       { ...icmpBase, stepIndex: 2 * i + 1, delayMs: t + roundTrip / 2, srcIp: r.ip, dstIp: src.data.ip, ...back1, route: [...path].reverse(),
-        info: `Echo (ping) reply    id=0x0001, seq=${i}, ttl=${internet ? 52 : 64 - hops}` },
+        info: `Echo (ping) reply    id=0x0001, seq=${i}, ttl=${replyTtl}` },
     )
   }
   ctx.dispatchCaptures?.(captures)
@@ -93,7 +95,7 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
   for (let i = 0; i < 4; i++) {
     const rtt = internet ? 20 + hops * 8 + Math.floor(Math.random() * 15) : simulatePingRtt(hops)
     rtts.push(rtt)
-    body.push(out(`64 bytes from ${r.ip}: icmp_seq=${i} ttl=${internet ? 52 : 64 - hops} time=${rtt} ms`))
+    body.push(out(`64 bytes from ${r.ip}: icmp_seq=${i} ttl=${replyTtl} time=${rtt} ms`))
   }
   const min = Math.min(...rtts), max = Math.max(...rtts)
   const avg = Math.round(rtts.reduce((a, b) => a + b, 0) / rtts.length)
