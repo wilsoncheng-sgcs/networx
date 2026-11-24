@@ -786,6 +786,12 @@ function MailboxesTab({ domain, mailboxes, onDomain, onMailboxes, onRestore }: {
 
 // ─── DNS server: records ──────────────────────────────────────────────────────
 
+/** A host name that may wrap after each dot (never in the middle of a label). */
+function DottedName({ name }: { name: string }) {
+  const parts = name.split('.')
+  return <>{parts.map((p, i) => <span key={i}>{p}{i < parts.length - 1 ? '.' : ''}{i < parts.length - 1 && <wbr />}</span>)}</>
+}
+
 const VALUE_PLACEHOLDER: Record<DnsRecordType, string> = {
   A: '203.0.113.80',
   AAAA: '2001:db8::80',
@@ -859,9 +865,9 @@ function RecordsTab({ records, onChange }: { records: DnsRecord[]; onChange: (r:
           <tbody>
             {records.map((r) => (
               <tr key={r.id} data-testid="dns-record-row" className={`border-t border-gray-100 ${editing === r.id ? 'bg-blue-50' : ''}`}>
-                <td className="px-2 py-1 font-mono break-all">{r.name}</td>
+                <td className="px-2 py-1 font-mono"><DottedName name={r.name} /></td>
                 <td className="px-1 py-1 font-mono font-semibold text-gray-600">{r.type}</td>
-                <td className="px-1 py-1 font-mono break-all" title={rdata(r)}>{r.type === 'MX' ? `${r.priority ?? 10} ${r.value}` : r.value}</td>
+                <td className="px-1 py-1 font-mono [overflow-wrap:anywhere]" title={rdata(r)}>{r.type === 'MX' && `${r.priority ?? 10} `}<DottedName name={r.value} /></td>
                 <td className="px-1 py-1 font-mono text-right">{r.ttl}</td>
                 <td className="px-1 py-1">
                   <div className="flex items-center justify-end gap-1">
@@ -966,9 +972,9 @@ function RecordsTable({ records }: { records: DnsRecord[] }) {
         <tbody>
           {records.map((r) => (
             <tr key={r.id} data-testid="dns-record-row" className="border-t border-gray-100">
-              <td className="px-2 py-1 font-mono break-all">{r.name}</td>
+              <td className="px-2 py-1 font-mono"><DottedName name={r.name} /></td>
               <td className="px-1 py-1 font-mono font-semibold text-gray-600">{r.type}</td>
-              <td className="px-1 py-1 font-mono break-all">{r.type === 'MX' ? `${r.priority ?? 10} ${r.value}` : r.value}</td>
+              <td className="px-1 py-1 font-mono [overflow-wrap:anywhere]">{r.type === 'MX' && `${r.priority ?? 10} `}<DottedName name={r.value} /></td>
               <td className="px-2 py-1 font-mono text-right">{r.ttl}</td>
             </tr>
           ))}

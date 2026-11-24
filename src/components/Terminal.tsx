@@ -197,7 +197,7 @@ export default function Terminal({ nodeId, onClose }: Props) {
           <p className="text-gray-500 text-xs">Type <span className="text-green-400">help</span> to see available commands.</p>
         )}
         {lines.map((line, i) => (
-          <div key={i} style={{ color: lineColor(line.type), whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: '1.5' }}>
+          <div key={i} style={{ color: lineColor(line.type), whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', lineHeight: '1.5', minHeight: '1.5em' }}>
             {line.text}
           </div>
         ))}

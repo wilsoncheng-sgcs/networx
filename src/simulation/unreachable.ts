@@ -5,7 +5,7 @@ import { HOP_MS, scaledHop, leg, firstHopMacs, nextBatchId } from './packets'
 import { CONV_HOP_MS, ephemeralPort } from './exchange'
 import type { Route } from './routing'
 import type { DnsRecordType } from '../types'
-import { queryInfo, newTransactionId } from './dns'
+import { queryInfo, newTransactionId, messageSize } from './dns'
 
 type Failed = Extract<Route, { ok: false }>
 
@@ -81,7 +81,7 @@ export function playUnreachable(
       if (attempt.kind === 'dns') {
         packets.push(...drop(leg(route.reach, ctx.edges, 'DNS', i ? 'DNS (again)' : 'DNS query', t, false, hop)))
         captures.push({
-          ...base, srcPort: clientPort, dstPort: 53, transport: 'UDP', app: 'DNS', length: 20 + 8 + 17 + attempt.name.length,
+          ...base, srcPort: clientPort, dstPort: 53, transport: 'UDP', app: 'DNS', length: 20 + 8 + messageSize(attempt.name, []),
           info: queryInfo(dnsId, attempt.qtype ?? 'A', attempt.name), payload: `Query: ${attempt.name}, type ${attempt.qtype ?? 'A'}, class IN`,
         })
       } else if (attempt.kind === 'tcp') {

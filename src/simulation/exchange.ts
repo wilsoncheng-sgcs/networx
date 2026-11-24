@@ -4,7 +4,7 @@ import { findPath, nodeById } from './network'
 import { arpBefore, firstHopMacs, leg, populateMacTables, scaledHop } from './packets'
 import type { DnsQuery } from './resolve'
 import type { DnsRecordType } from '../types'
-import { queryInfo, responseInfo, responsePayload, normName, newTransactionId, DEFAULT_TTL, type DnsAnswer } from './dns'
+import { queryInfo, responseInfo, responsePayload, normName, newTransactionId, messageSize, DEFAULT_TTL, type DnsAnswer } from './dns'
 
 /**
  * The conversation engine (spec §2). A command builds a Conversation — client, server,
@@ -28,6 +28,7 @@ export interface Step {
   cleartext?: string         // the readable part of a partly-encrypted record (TLS 1.3 ServerHello)
   note?: string              // an extra line for the capture detail pane
   serverPort?: number        // override (FTP data = 20)
+  wireBytes?: number         // application bytes on the wire, when not the payload text (a DNS message)
   clientPort?: number        // override (FTP data connection's client port)
   lines?: TerminalLine[]     // printed when this Step's leg finishes
 }
@@ -106,10 +107,12 @@ export function dnsSteps(id: string, name: string, qtype: DnsRecordType, answer:
   return [
     { dir: 'c2s', transport: 'UDP', app: 'DNS', label: 'DNS query',
       info: queryInfo(id, qtype, name),
-      payload: `Query: ${normName(name) || '<Root>'}, type ${qtype}, class IN` },
+      payload: `Query: ${normName(name) || '<Root>'}, type ${qtype}, class IN`,
+      wireBytes: messageSize(name, []) },
     { dir: 's2c', transport: 'UDP', app: 'DNS', label,
       info: responseInfo(id, qtype, name, answer),
-      payload: responsePayload(qtype, name, answer) },
+      payload: responsePayload(qtype, name, answer),
+      wireBytes: messageSize(name, answer.records) },
   ]
 }
 
@@ -370,7 +373,7 @@ function captureFor(
   const clientPort = step.clientPort ?? conv.clientPort
   const c2s = step.dir === 'c2s'
   const plainBytes = (step.cleartext ? byteLength(step.cleartext) : 0) + (step.payload ? byteLength(step.payload) : 0)
-  const appBytes = step.encrypted
+  const appBytes = step.wireBytes !== undefined ? step.wireBytes : step.encrypted
     ? (step.cleartext ? byteLength(step.cleartext) : 0) + cipherLength(step.payload ?? '')
     : plainBytes
   return {

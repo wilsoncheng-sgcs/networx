@@ -33,7 +33,9 @@ function PacketDot({ edgePath, packet }: { edgePath: string; packet: PacketAnim 
         begin="indefinite"
         fill="freeze"
         repeatCount="1"
-        {...(packet.reverse ? { keyPoints: '1;0', keyTimes: '0;1', calcMode: 'linear' } : {})}
+        {...(packet.dropped
+          ? { keyPoints: packet.reverse ? '1;0.25' : '0;0.75', keyTimes: '0;1', calcMode: 'linear' }
+          : packet.reverse ? { keyPoints: '1;0', keyTimes: '0;1', calcMode: 'linear' } : {})}
       />
       <circle r={landed ? 8 : 5} fill={landed ? 'white' : color} stroke={landed ? '#dc2626' : 'white'} strokeWidth={landed ? 2 : 1.5} cx={0} cy={0} />
       {landed && (
