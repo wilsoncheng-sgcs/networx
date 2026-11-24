@@ -202,13 +202,31 @@ export function routeBetween(src: NetNode, dst: NetNode | null, dstIp: string, n
     }
   }
 
-  // 3. The reply needs a way back (replies to a private sender come back through its NAT gateway)
+  // 3. The reply needs a way back (replies to a private sender come back through its NAT gateway).
+  //    The destination makes its own sending decision with its own mask — even when the request came
+  //    straight across the segment.
   if (HOST_TYPES.includes(dst.data.deviceType) && src.data.ip) {
     const back = nextHop(dst, src.data.ip, src, nodes, edges)
     if (!back.ok && back.failure !== 'no-address') {
       return {
         ok: false, failure: 'no-reply', reach: path,
         explain: `ⓘ ${dst.data.label} received the request but can't send the reply: ${back.explain.replace(/^ⓘ /, '')}`,
+      }
+    }
+    // The reply goes to the destination's gateway: the router that hands it to the sender must be on the sender's network
+    if (back.ok && back.firstHop.id !== src.id && HOST_TYPES.includes(src.data.deviceType)) {
+      const rest = findPath(back.firstHop.id, src.id, nodes, edges)
+      const replyPath = rest ? [...back.segment.slice(0, -1), ...rest] : null
+      const at = replyPath ? deliveringRouter(replyPath, nodes) : -1
+      const router = at >= 0 ? nodes.find((n) => n.id === replyPath![at]) : undefined
+      if (router && router.data.deviceType !== 'cloud' && !onNetwork(router, src.data.ip)) {
+        const gw = dst.data.gateway
+        const srcNet = `${src.data.ip}/${subnetToCidr(maskOf(src))}`
+        const dstNet = `${dst.data.ip}/${subnetToCidr(maskOf(dst))}`
+        const explain = direct
+          ? `ⓘ ${src.data.label} (${srcNet}) thinks ${dstIp} is on its own subnet, but ${dst.data.label} (${dstNet}) thinks ${src.data.ip} is on another one, so it sends the reply to its gateway ${gw} — which can't deliver it. Both ends of a subnet must use the same mask.`
+          : `ⓘ ${dst.data.label} received the request but can't send the reply: it sends it to its gateway ${gw}, and ${router.data.label} can't deliver to ${src.data.ip} — that address isn't on ${router.data.label}'s network.`
+        return { ok: false, failure: 'no-reply', reach: path, explain }
       }
     }
   }

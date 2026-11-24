@@ -118,3 +118,34 @@ describe('A3 — TTL drops only at routers', () => {
     expect(new Set(ttls(run('reception', 'ping 10.0.0.1').text))).toEqual(new Set([64]))
   })
 })
+
+describe("A4 — the reply obeys the destination's own subnet decision", () => {
+  const mismatched = () => set(careConnect(), 'docpc', { ip: '10.0.1.13', subnet: '255.255.0.0', gateway: '10.0.0.1' })
+
+  it('mismatched masks: the requests reach Reception PC, no replies, and the ⓘ explains why', () => {
+    const { text, captures } = run('docpc', 'ping 10.0.0.11', mismatched())
+    expect(text).toContain('Request timeout for icmp_seq 0')
+    expect(text).not.toContain('bytes from')
+    expect(text).toContain(
+      "ⓘ Doctor's PC (10.0.1.13/16) thinks 10.0.0.11 is on its own subnet, but Reception PC (10.0.0.11/24) thinks 10.0.1.13 is on another one, so it sends the reply to its gateway 10.0.0.1 — which can't deliver it. Both ends of a subnet must use the same mask.",
+    )
+    const icmp = captures.filter((c) => c.app === 'ICMP')
+    expect(icmp.length).toBeGreaterThan(0)
+    expect(icmp.every((c) => c.info.startsWith('Echo (ping) request'))).toBe(true)
+    expect(icmp[0]!.route?.slice(-1)[0]).toBe('reception')
+  })
+
+  it('TCP: the SYN reaches the server, no SYN-ACK, the SYN is sent again', () => {
+    const net = mismatched()
+    const reception = net.nodes.find((n) => n.id === 'reception')!
+    reception.data = { ...reception.data, services: { ssh: true } }
+    const { captures } = run('docpc', 'ssh 10.0.0.11', net)
+    const tcp = captures.filter((c) => c.transport === 'TCP')
+    expect(tcp.map((c) => c.tcpFlags)).toEqual(['SYN', 'SYN', 'SYN'])
+  })
+
+  it('restoring the mask restores the ping', () => {
+    const net = set(careConnect(), 'docpc', { ip: '10.0.0.13', subnet: '255.255.255.0' })
+    expect(run('docpc', 'ping 10.0.0.11', net).text).toContain('64 bytes from 10.0.0.11')
+  })
+})
