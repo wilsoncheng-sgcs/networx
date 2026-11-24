@@ -1,5 +1,5 @@
-import type { TerminalLine, PacketAnim, PendingCapture } from '../types'
-import { nodeById, simulatePingRtt, subnetToCidr } from './network'
+import type { TerminalLine, PacketAnim, PendingCapture, NetNode } from '../types'
+import { nodeById, simulatePingRtt, subnetToCidr, sameSubnet, networkRange } from './network'
 import { type TermContext, type Lines, out, err, info, self, delayLines } from './context'
 import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
 import { resolveTarget, isResolveError, isIp, dnsServersOf, defaultDnsServer, routeTo, nodeForIp, type Resolution } from './resolve'
@@ -364,12 +364,48 @@ export const DHCP_SERVER_PORT = 67
 export const DHCP_CLIENT_PORT = 68
 const LEASE_SECONDS = 86400
 
-function cmdDhclient(_args: string[], ctx: TermContext): Lines {
+/**
+ * The address a DHCP server offers `client`: the next free address in its pool (last-octet range,
+ * e.g. "100-200") that is on the server's own network, or the client's current one if it already holds
+ * one of those (a renewal). The client also gets the server's subnet mask and the server as its gateway.
+ */
+export function dhcpOffer(router: NetNode, client: NetNode, nodes: NetNode[]): { ip: string; subnet: string; gateway: string } | null {
+  const gateway = router.data.ip
+  const subnet = router.data.subnet || '255.255.255.0'
+  const prefix = gateway.split('.').slice(0, 3).join('.')
+  const [startStr, endStr] = ((router.data.dhcpPool as string | undefined) || '100-200').split('-')
+  const start = parseInt(startStr ?? '100', 10)
+  const end = endStr ? parseInt(endStr, 10) : 200
+  const { network, broadcast } = networkRange(gateway, subnet)
+  const usable = (ip: string) => sameSubnet(ip, gateway, subnet) && ip !== network && ip !== broadcast
+  const pool: string[] = []
+  for (let i = start; i <= end && i <= 255; i++) {
+    const candidate = `${prefix}.${i}`
+    if (usable(candidate)) pool.push(candidate)
+  }
+  const used = new Set(nodes.filter((n) => n.id !== client.id).flatMap((n) => [n.data.ip, n.data.wanIp as string | undefined]).filter(Boolean))
+  const ip = (client.data.ip && pool.includes(client.data.ip) && !used.has(client.data.ip))
+    ? client.data.ip
+    : pool.find((c) => !used.has(c))
+  return ip ? { ip, subnet, gateway } : null
+}
+
+export interface DhcpResult {
+  lines: Lines
+  ok: boolean
+  /** When the ACK arrives (ms) and the device has its address. */
+  ackMs: number
+  ip?: string
+  server?: NetNode
+}
+
+/** Ask for an address by DHCP (dhclient, ipconfig /renew, or Configure → Obtain by DHCP). */
+export function dhcpRequest(ctx: TermContext): DhcpResult {
   const src = self(ctx)
 
   // Find DHCP-enabled routers/gateways reachable from this node
   const dhcpRouters = ctx.nodes.filter(
-    (n) => (n.data.deviceType === 'router' || n.data.deviceType === 'gateway') && n.data.dhcpEnabled,
+    (n) => (n.data.deviceType === 'router' || n.data.deviceType === 'gateway') && n.data.dhcpEnabled && n.data.ip && n.data.isOn !== false,
   )
 
   for (const router of dhcpRouters) {
@@ -377,25 +413,13 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
     const path = findSegmentPath(src.id, router.id, ctx.nodes, ctx.edges)
     if (!path) continue
 
-    // Parse pool range (last-octet format "100-200")
-    const routerIpParts = router.data.ip.split('.')
-    const prefix = routerIpParts.slice(0, 3).join('.')
-    const pool = (router.data.dhcpPool as string | undefined) || '100-200'
-    const [startStr, endStr] = pool.split('-')
-    const startLast = parseInt(startStr ?? '100', 10)
-    const endLast   = endStr ? parseInt(endStr, 10) : 200
-
-    // Find next unused IP from pool
-    const usedIps = new Set(ctx.nodes.map((n) => n.data.ip).filter(Boolean))
-    let assignedIp: string | null = null
-    for (let i = startLast; i <= endLast; i++) {
-      const candidate = `${prefix}.${i}`
-      if (!usedIps.has(candidate)) { assignedIp = candidate; break }
+    const offer = dhcpOffer(router, src, ctx.nodes)
+    if (!offer) {
+      return { ok: false, ackMs: 0, lines: [err('dhclient: No IPs available in DHCP pool — all addresses in use.')] }
     }
-
-    if (!assignedIp) {
-      return [err('dhclient: No IPs available in DHCP pool — all addresses in use.')]
-    }
+    const { ip: assignedIp, subnet, gateway } = offer
+    const cidr = subnetToCidr(subnet)
+    const { broadcast } = networkRange(assignedIp, subnet)
 
     // 4-way DHCP exchange: DISCOVER → OFFER → REQUEST → ACK, over UDP 68 ⇄ 67
     const legMs = (path.length - 1) * scaledHop(HOP_MS)
@@ -408,33 +432,41 @@ function cmdDhclient(_args: string[], ctx: TermContext): Lines {
     ctx.dispatchPackets?.(dhcpPackets)
     // The DNS server the router hands out (its setting, else the network's DNS server)
     const dns = typeof router.data.dhcpDns === 'string' ? router.data.dhcpDns : defaultDnsServer(router, ctx.nodes, ctx.edges)
-    ctx.dispatchCaptures?.(dhcpCaptures(src.data.mac, router, assignedIp, `${prefix}.1`, dns, path, ctx, legMs))
+    ctx.dispatchCaptures?.(dhcpCaptures(src.data.mac, router, assignedIp, subnet, gateway, dns, path, ctx, legMs))
 
     // Update the node's IP address when the ACK arrives
     const ackMs = 4 * legMs
     const apply = () => ctx.updateNodeData?.(src.id, {
       ip: assignedIp,
-      gateway: `${prefix}.1`,
-      subnet: '255.255.255.0',
+      gateway,
+      subnet,
       dnsServer: dns,
+      ipMode: 'dhcp',
     })
     if (ctx.schedule) ctx.schedule(ackMs, apply)
     else apply()
 
-    return [
-      info('DHCP DISCOVER sent (broadcast)…'),
-      { ...info(`DHCP OFFER received from ${router.data.ip}: ${assignedIp}`), delayMs: 2 * legMs },
-      { ...info('DHCP REQUEST sent…'), delayMs: 2 * legMs },
-      { ...info(`DHCP ACK — lease granted.`), delayMs: ackMs },
-      { ...out(''), delayMs: ackMs },
-      { ...out(`inet ${assignedIp}/24 brd ${prefix}.255 scope global dynamic eth0`), delayMs: ackMs },
-      { ...out(`   valid_lft ${LEASE_SECONDS}sec preferred_lft ${LEASE_SECONDS}sec`), delayMs: ackMs },
-      { ...out(`   gateway ${prefix}.1  DNS server ${dns || '(none)'}`), delayMs: ackMs },
-      { ...info('ⓘ DHCP runs over UDP: the client sends from port 68 to port 67. It has no address yet, so it sends from 0.0.0.0 to the broadcast address 255.255.255.255.'), delayMs: ackMs },
-    ]
+    return {
+      ok: true, ackMs, ip: assignedIp, server: router,
+      lines: [
+        info('DHCP DISCOVER sent (broadcast)…'),
+        { ...info(`DHCP OFFER received from ${router.data.ip}: ${assignedIp}`), delayMs: 2 * legMs },
+        { ...info('DHCP REQUEST sent…'), delayMs: 2 * legMs },
+        { ...info(`DHCP ACK — lease granted.`), delayMs: ackMs },
+        { ...out(''), delayMs: ackMs },
+        { ...out(`inet ${assignedIp}/${cidr} brd ${broadcast} scope global dynamic eth0`), delayMs: ackMs },
+        { ...out(`   valid_lft ${LEASE_SECONDS}sec preferred_lft ${LEASE_SECONDS}sec`), delayMs: ackMs },
+        { ...out(`   gateway ${gateway}  DNS server ${dns || '(none)'}`), delayMs: ackMs },
+        { ...info('ⓘ DHCP runs over UDP: the client sends from port 68 to port 67. It has no address yet, so it sends from 0.0.0.0 to the broadcast address 255.255.255.255.'), delayMs: ackMs },
+      ],
+    }
   }
 
-  return [err('dhclient: No DHCP server found. Is a router with DHCP enabled connected to this network?')]
+  return { ok: false, ackMs: 0, lines: [err('dhclient: No DHCP server found. Is a router with DHCP enabled connected to this network?')] }
+}
+
+function cmdDhclient(_args: string[], ctx: TermContext): Lines {
+  return dhcpRequest(ctx).lines
 }
 
 /**
@@ -445,6 +477,7 @@ function dhcpCaptures(
   clientMac: string,
   router: { data: { ip: string; mac: string } },
   offered: string,
+  subnet: string,
   gateway: string,
   dns: string,
   path: string[],
@@ -473,9 +506,9 @@ function dhcpCaptures(
   })
   return [
     rec(0, true, 'Discover', `DHCP Discover\n  client MAC: ${clientMac}\n  asks: any DHCP server, please offer me an address`),
-    rec(1, false, 'Offer', `DHCP Offer\n  your address: ${offered}\n  subnet mask: 255.255.255.0\n  router (default gateway): ${gateway}\n  domain name server: ${dns}\n  lease time: ${LEASE_SECONDS} s\n  DHCP server: ${router.data.ip}`),
+    rec(1, false, 'Offer', `DHCP Offer\n  your address: ${offered}\n  subnet mask: ${subnet}\n  router (default gateway): ${gateway}\n  domain name server: ${dns}\n  lease time: ${LEASE_SECONDS} s\n  DHCP server: ${router.data.ip}`),
     rec(2, true, 'Request', `DHCP Request\n  requested address: ${offered}\n  DHCP server: ${router.data.ip}`),
-    rec(3, false, 'ACK', `DHCP ACK\n  your address: ${offered}\n  subnet mask: 255.255.255.0\n  router (default gateway): ${gateway}\n  domain name server: ${dns}\n  lease time: ${LEASE_SECONDS} s`),
+    rec(3, false, 'ACK', `DHCP ACK\n  your address: ${offered}\n  subnet mask: ${subnet}\n  router (default gateway): ${gateway}\n  domain name server: ${dns}\n  lease time: ${LEASE_SECONDS} s`),
   ]
 }
 
