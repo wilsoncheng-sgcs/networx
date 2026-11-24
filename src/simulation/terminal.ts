@@ -2,11 +2,12 @@ import type { TerminalLine, PacketAnim, PendingCapture } from '../types'
 import { nodeById, simulatePingRtt, subnetToCidr } from './network'
 import { type TermContext, type Lines, out, err, info, self, delayLines } from './context'
 import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
-import { resolveTarget, isResolveError, isIp, dnsServerFor, routeTo, nodeForIp, dnsUnreachableExplain, type Resolution } from './resolve'
+import { resolveTarget, isResolveError, isIp, dnsServerIpOf, routeTo, nodeForIp, type Resolution } from './resolve'
+import { playLookup } from './lookup'
 import { errnoText, findSegmentPath, type Route } from './routing'
 import { playUnreachable } from './unreachable'
 import { tokenize } from './tokenize'
-import { dnsConversation, runConversations, hostKeyFingerprint, newConversation, tcpOpen, tcpRefused } from './exchange'
+import { runConversations, hostKeyFingerprint, newConversation, tcpOpen, tcpRefused } from './exchange'
 import { cmdCurl } from './protocols/web'
 import { cmdFtp, cmdSftp, sshHandshake, sshEncrypted } from './protocols/files'
 import { cmdPop3, cmdImap, cmdSmtp, cmdMail } from './protocols/mail'
@@ -22,8 +23,7 @@ export { PUBLIC_IPS } from './resolve'
  * Returns when the answer arrives (ms), so later packets and lines can wait for it.
  */
 function animateDns(r: Resolution, ctx: TermContext): number {
-  const dnsLeg = dnsConversation(r, ctx)
-  return dnsLeg ? runConversations([dnsLeg], ctx).endMs : 0
+  return playLookup(r, ctx).endMs
 }
 
 /** The error line for a name that didn't resolve, and why when the address rules are the reason. */
@@ -36,6 +36,7 @@ function resolveErrorText(cmd: string, r: Resolution & { error: string }): strin
   switch (r.error) {
     case 'nxdomain': return `${cmd}: cannot resolve ${r.name}: Unknown host`
     case 'no-dns':   return `${cmd}: ${r.name}: Name or service not known`
+    case 'timeout':  return `${cmd}: ${r.name}: Temporary failure in name resolution`
     default:         return `${cmd}: sendmsg: No route to host`
   }
 }
@@ -260,26 +261,33 @@ function cmdIfconfig(_args: string[], ctx: TermContext): Lines {
 function cmdNslookup(args: string[], ctx: TermContext): Lines {
   const domain = args[0]
   if (!domain) return [err('Usage: nslookup <domain>')]
+  const timedOut = (r: Resolution & { explain?: string }, at: number): Lines => [
+    err(';; connection timed out; no servers could be reached', at),
+    ...(r.explain ? [info(r.explain, at)] : []),
+  ]
 
   if (isIp(domain)) {
     // Reverse lookup needs PTR records, which Networx's DNS server doesn't hold
-    const server = dnsServerFor(ctx)
-    if (!server) return [out('Server:   (none)'), out(''), err(';; connection timed out; no servers could be reached'), ...(dnsUnreachableExplain(ctx) ? [info(dnsUnreachableExplain(ctx)!)] : [])]
+    const serverIp = dnsServerIpOf(ctx)
+    if (!serverIp) return [out('Server:   (none)'), out(''), err(';; connection timed out; no servers could be reached')]
     const arpa = `${domain.split('.').reverse().join('.')}.in-addr.arpa`
     return [
-      out(`Server:   ${server.ip}`),
-      out(`Address:  ${server.ip}#53`),
+      out(`Server:   ${serverIp}`),
+      out(`Address:  ${serverIp}#53`),
       out(''),
       out(`** server can't find ${arpa}: NXDOMAIN`),
     ]
   }
 
   const r = resolveTarget(domain, ctx)
-  const afterDns = animateDns(r, ctx)
-
-  if (!r.dnsServerIp) {
-    return [out('Server:   (none)'), out(''), err(';; connection timed out; no servers could be reached'), ...(dnsUnreachableExplain(ctx) ? [info(dnsUnreachableExplain(ctx)!)] : [])]
+  if (isResolveError(r) && r.error === 'no-dns') {
+    return [out('Server:   (none)'), out(''), ...timedOut(r, 0)]
   }
+  if (isResolveError(r) && r.error === 'timeout') {
+    // The query went out three times and nothing came back
+    return playLookup(r, ctx, timedOut(r, 0)).lines
+  }
+  const afterDns = animateDns(r, ctx)
 
   const lines: Lines = [
     out(`Server:   ${r.dnsServerIp}`),

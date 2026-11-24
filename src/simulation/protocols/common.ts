@@ -3,6 +3,7 @@ import type { TermContext, Lines } from '../context'
 import { resolveTarget, isResolveError, routeTo, type Resolved } from '../resolve'
 import { errnoText } from '../routing'
 import { playUnreachable } from '../unreachable'
+import { playLookup } from '../lookup'
 import { info } from '../context'
 import { isListening, serviceById, type ServiceId } from '../services'
 import { type Leg, type Step, dnsConversation, newConversation, tcpRefused, runConversations } from '../exchange'
@@ -35,8 +36,7 @@ export function connectTo(
       ...(r.error === 'no-route' ? messages.noRoute('No route to host') : messages.unresolved),
       ...(r.explain ? [info(r.explain)] : []),
     ]
-    const dnsLeg = dnsConversation(r, ctx, lines)
-    return dnsLeg ? { lines: runConversations([dnsLeg], ctx).lines } : { lines }
+    return { lines: playLookup(r, ctx, lines).lines }
   }
   const dnsLeg = dnsConversation(r, ctx)
   const route = routeTo(r.node, r.ip, ctx)

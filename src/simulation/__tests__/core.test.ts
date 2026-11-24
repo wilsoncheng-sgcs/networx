@@ -5,6 +5,7 @@ import { resolveTarget, isResolveError } from '../resolve'
 import { normaliseNode, makeDefaultData } from '../defaults'
 import type { NetNode } from '../../types'
 import { careConnect, testCtx } from './helpers'
+import { PRESETS } from '../presets'
 
 describe('services table (spec §2.2)', () => {
   const expected: Array<[ServiceId, string, 'TCP' | 'UDP', number, boolean]> = [
@@ -104,11 +105,19 @@ describe('resolveTarget (spec §2.5)', () => {
     }
   })
 
-  it('errors with no DNS server and no internet', () => {
+  it("times out when the DNS server can't be reached (never falls back to another server)", () => {
     const net = careConnect()
     net.edges = net.edges.filter((e) => e.id !== 'cc-e2') // unplug the home gateway from the internet
     const { ctx } = testCtx('patient', net)
     const r = resolveTarget('www.careconnect.example', ctx)
+    expect(isResolveError(r) && r.error).toBe('timeout')
+  })
+
+  it('errors with no DNS server and no internet', () => {
+    const preset = PRESETS.find((p) => p.id === 'star-lan')!
+    const net = { nodes: structuredClone(preset.nodes).map(normaliseNode), edges: structuredClone(preset.edges) }
+    const { ctx } = testCtx('pc1', net)
+    const r = resolveTarget('www.example.com', ctx)
     expect(isResolveError(r) && r.error).toBe('no-dns')
   })
 

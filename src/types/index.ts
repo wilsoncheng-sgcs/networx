@@ -108,6 +108,8 @@ export interface NodeData extends Record<string, unknown> {
   mailDomain?: string                               // mail server, e.g. 'careconnect.example'
   mailboxes?: Mailbox[]                             // mail server
   localMail?: MailMessage[]                         // any client: mail downloaded by POP3
+  // ── Phase 4 ──
+  dnsServer?: string                                // hosts: the DNS server this device asks ('' = none)
 }
 
 export type NetNode = Node<NodeData>

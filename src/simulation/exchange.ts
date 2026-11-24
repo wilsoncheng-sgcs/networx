@@ -2,7 +2,7 @@ import type { TerminalLine, PacketAnim, PendingCapture, AppProtocol, NetNode, Ce
 import type { TermContext } from './context'
 import { findPath, nodeById } from './network'
 import { arpBefore, firstHopMacs, leg, populateMacTables, scaledHop } from './packets'
-import { type Resolution, isResolveError, routeTo } from './resolve'
+import { type Resolution, isResolveError } from './resolve'
 
 /**
  * The conversation engine (spec §2). A command builds a Conversation — client, server,
@@ -422,15 +422,12 @@ export function runConversations(
   return { lines, endMs: t }
 }
 
-/** The DNS Conversation for a resolution — played whenever a DNS server was asked, even for NXDOMAIN. */
+/** The DNS Conversation for a resolution — played whenever a DNS server answered, even for NXDOMAIN. */
 export function dnsConversation(r: Resolution, ctx: TermContext, lines?: TerminalLine[]): Leg | null {
-  if (!r.dnsServerNode || !r.dnsServerIp) return null
-  const route = routeTo(r.dnsServerNode, r.dnsServerIp, ctx)
-  if (!route.ok) return null
-  const path = route.path
+  if (!r.query) return null
   const steps = dnsLookup(r.name, isResolveError(r) ? null : r.ip)
   if (lines) steps[1]!.lines = lines
-  return { conv: newConversation(ctx.selfId, r.dnsServerNode.id, r.dnsServerIp, 53, steps), path }
+  return { conv: newConversation(ctx.selfId, r.query.server.id, r.query.serverIp, 53, steps), path: r.query.path }
 }
 
 /** Path from this device to `server`, or null. */

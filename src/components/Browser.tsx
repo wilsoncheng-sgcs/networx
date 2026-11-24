@@ -90,8 +90,13 @@ export default function Browser({ nodeId }: Props) {
             break
           }
           case 'no-dns':
-            setError({ url: parsed.href, kind: 'unresolved', message: `${host} could not be resolved.\n\nNo DNS server is reachable from this device.` })
+            setError({ url: parsed.href, kind: 'unresolved', message: `${host} could not be resolved.\n\nThis device has no DNS server to ask.\n\nERR_NAME_NOT_RESOLVED` })
             break
+          case 'dns-timeout': {
+            const why = (result.explain ?? '').replace(/^ⓘ /, '')
+            setError({ url: parsed.href, kind: 'unresolved', message: [`${host}'s server IP address could not be found.`, why, 'ERR_NAME_NOT_RESOLVED'].filter(Boolean).join('\n\n') })
+            break
+          }
           default:
             setError({ url: parsed.href, kind: 'unreachable', message: `${host} is not reachable from this device.\n\nCheck the network connections.` })
         }

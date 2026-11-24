@@ -3,6 +3,7 @@ import { type TermContext, type Lines, out, err, info, self } from '../context'
 import { resolveTarget, isResolveError, isIp, routeTo } from '../resolve'
 import { errnoText } from '../routing'
 import { playUnreachable } from '../unreachable'
+import { playLookup } from '../lookup'
 import { isListening } from '../services'
 import {
   type Step, type CertInfo, type CertProblem, type Leg,
@@ -115,7 +116,7 @@ export function pageFor(server: NetNode, host: string, ip: string): string {
 
 // ── Fetching a URL (shared by curl and the browser) ─────────────────────────
 
-export type WebFailure = 'bad-url' | 'nxdomain' | 'no-dns' | 'no-route' | 'unreachable' | 'timeout' | 'refused' | 'cert'
+export type WebFailure = 'bad-url' | 'nxdomain' | 'no-dns' | 'dns-timeout' | 'no-route' | 'unreachable' | 'timeout' | 'refused' | 'cert'
 
 export interface WebResult {
   ok: boolean
@@ -169,10 +170,9 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
     const failLines = r.error === 'no-route'
       ? L(err(`curl: (7) Failed to connect to ${host} port ${port} after 0 ms: No route to host`))
       : [...L(err(`curl: (6) Could not resolve host: ${host}`)), ...(r.explain ? L(info(r.explain)) : [])]
-    const dnsLeg = dnsConversation(r, ctx, failLines)
-    if (!dnsLeg) return { ok: false, url, failure: r.error, lines: failLines, endMs: 0 }
-    const run = runConversations([dnsLeg], ctx)
-    return { ok: false, url, failure: r.error, lines: run.lines, endMs: run.endMs }
+    const run = playLookup(r, ctx, failLines)
+    const failure: WebFailure = r.error === 'timeout' ? 'dns-timeout' : r.error
+    return { ok: false, url, failure, explain: r.explain, lines: run.lines, endMs: run.endMs }
   }
 
   const dnsLeg = dnsConversation(r, ctx, resolvedLines)

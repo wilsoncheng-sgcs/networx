@@ -10,6 +10,11 @@ type Failed = Extract<Route, { ok: false }>
 export type Attempt =
   | { kind: 'tcp'; port: number }
   | { kind: 'icmp' }
+  /** A DNS query (UDP 53): the resolver sends it three times, about 5 s apart, then gives up. */
+  | { kind: 'dns'; name: string }
+
+/** How long a resolver waits for a DNS answer before sending the query again (simulation clock, Normal speed). */
+export const DNS_RETRY_MS = 5000
 
 /**
  * Play what a failed connection looks like on the wire, then print `lines`:
@@ -53,19 +58,28 @@ export function playUnreachable(
     return { lines: at(end), endMs: end }
   }
 
-  if ((route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply') && route.reach && route.reach.length > 1) {
+  const travels = route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply'
+  if (travels && route.reach && route.reach.length > 1) {
     const hop = scaledHop(CONV_HOP_MS)
     const legMs = (route.reach.length - 1) * hop
     const macs = firstHopMacs(route.reach, ctx.nodes)
-    const tries = attempt.kind === 'tcp' ? 3 : 4
+    const tries = attempt.kind === 'icmp' ? 4 : 3
     const clientPort = ephemeralPort()
+    // A resolver waits about 5 s for each answer; TCP and ping retry as soon as the last one has gone
+    const gap = attempt.kind === 'dns' ? Math.max(scaledHop(DNS_RETRY_MS), legMs + hop) : legMs + Math.max(hop, 1)
     let t = startMs
     for (let i = 0; i < tries; i++) {
       const base = {
         delayMs: t, conversationId: convId, stepIndex: i, route: route.reach,
         srcIp: src.data.ip, dstIp, ...macs, encrypted: false,
       }
-      if (attempt.kind === 'tcp') {
+      if (attempt.kind === 'dns') {
+        packets.push(...leg(route.reach, ctx.edges, 'DNS', i ? 'DNS (again)' : 'DNS query', t, false, hop))
+        captures.push({
+          ...base, srcPort: clientPort, dstPort: 53, transport: 'UDP', app: 'DNS', length: 20 + 8 + 17 + attempt.name.length,
+          info: `Standard query A ${attempt.name}`, payload: `Query: ${attempt.name}, type A, class IN`,
+        })
+      } else if (attempt.kind === 'tcp') {
         packets.push(...leg(route.reach, ctx.edges, 'TCP', i ? 'SYN (again)' : 'SYN', t, false, hop))
         captures.push({
           ...base, srcPort: clientPort, dstPort: attempt.port, transport: 'TCP', tcpFlags: 'SYN', app: null, length: 40,
@@ -78,9 +92,10 @@ export function playUnreachable(
           info: `Echo (ping) request  id=0x0001, seq=${i}, ttl=64 (no response found!)`,
         })
       }
-      t += legMs + Math.max(hop, 1)
+      t += gap
     }
-    const end = t + legMs
+    // DNS: the resolver gives up when the last wait runs out; otherwise lines follow the last packet
+    const end = attempt.kind === 'dns' ? t : t + legMs
     ctx.dispatchPackets?.(packets)
     ctx.dispatchCaptures?.(captures)
     return { lines: at(end), endMs: end }
