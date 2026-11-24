@@ -51,6 +51,7 @@ export interface DnsQuery {
 
 /** A DNS server that never answered: how far the queries got, and why. */
 export interface DnsTimeout {
+  qtype: DnsRecordType
   serverIp: string
   server: NetNode | null
   route: Failed
@@ -174,12 +175,12 @@ function lastRouterIndex(path: string[], nodes: NetNode[]): number {
  * Send a query to this device's DNS server: the path it takes, or how far it gets when nothing answers.
  * null when the device has no DNS server set.
  */
-function askDnsServer(ctx: TermContext):
+function askDnsServer(ctx: TermContext, qtype: DnsRecordType, serverOverride?: string):
   | { ok: true; server: NetNode; serverIp: string; path: string[] }
   | { ok: false; timeout: DnsTimeout; explain: string }
   | null {
   const src = nodeById(ctx.selfId, ctx.nodes)
-  const serverIp = dnsServerIpOf(ctx)
+  const serverIp = serverOverride ?? dnsServerIpOf(ctx)
   if (!src || !serverIp) return null
   const server = dnsServerAt(serverIp, ctx)
   const noAnswer = `ⓘ The DNS server ${serverIp} didn't answer, so the name couldn't be turned into an IP address. Connecting by IP address still works.`
@@ -195,13 +196,13 @@ function askDnsServer(ctx: TermContext):
     const explain = clientSide
       ? `ⓘ Names can't be looked up: the DNS server (${serverIp}) can't be reached. ${route.explain.replace(/^ⓘ /, '')}`
       : route.failure === 'blocked' ? `${noAnswer} ${route.explain.replace(/^ⓘ /, '')}` : noAnswer
-    return { ok: false, timeout: { serverIp, server, route: failed }, explain }
+    return { ok: false, timeout: { qtype, serverIp, server, route: failed }, explain }
   }
   if (!server || !answersDns(server, serverIp)) {
     // Switched off: the last router can't hand the queries over. Not a DNS server: nothing answers on port 53.
     const off = !!server && server.data.isOn === false
     const reach = off ? route.path.slice(0, lastRouterIndex(route.path, ctx.nodes) + 1) : route.path
-    return { ok: false, timeout: { serverIp, server, route: { ok: false, failure: 'no-reply', reach, explain: noAnswer } }, explain: noAnswer }
+    return { ok: false, timeout: { qtype, serverIp, server, route: { ok: false, failure: 'no-reply', reach, explain: noAnswer } }, explain: noAnswer }
   }
   return { ok: true, server, serverIp, path: route.path }
 }
@@ -245,9 +246,9 @@ export type DnsLookup =
   | { kind: 'timeout'; timeout: DnsTimeout; explain: string }
   | { kind: 'no-dns'; explain: string }
 
-/** Ask this device's DNS server for `qtype` records of `name`. */
-export function lookupName(name: string, qtype: DnsRecordType, ctx: TermContext): DnsLookup {
-  const asked = askDnsServer(ctx)
+/** Ask this device's DNS server (or `serverIp`) for `qtype` records of `name`. */
+export function lookupName(name: string, qtype: DnsRecordType, ctx: TermContext, serverIp?: string): DnsLookup {
+  const asked = askDnsServer(ctx, qtype, serverIp)
   if (!asked) {
     const me = nodeById(ctx.selfId, ctx.nodes)
     return { kind: 'no-dns', explain: `ⓘ ${me?.data.label ?? 'This device'} has no DNS server to ask, so names can't be turned into IP addresses. Connecting by IP address still works.` }

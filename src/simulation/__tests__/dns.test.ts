@@ -100,3 +100,70 @@ describe('B2 — connections with the new records', () => {
     expect(text).toContain('ⓘ This name only has an IPv6 address (AAAA record); Networx connects over IPv4 only.')
   })
 })
+
+describe('B3 — dig and nslookup -type', () => {
+  it('dig www: CNAME then A, TTLs 300 and 3600, the aa flag, and notes on each', () => {
+    const { text, captures } = run('patient', 'dig www.careconnect.example')
+    expect(text).toContain('; <<>> DiG 9.10.6 <<>> www.careconnect.example')
+    expect(text).toMatch(/;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: \d+/)
+    expect(text).toContain(';; flags: qr aa rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1')
+    expect(text).toMatch(/www\.careconnect\.example\. 300\tIN\tCNAME\tcareconnect\.example\.\ncareconnect\.example\. +3600\tIN\tA\t203\.0\.113\.80/)
+    expect(text).toContain(';; SERVER: 203.0.113.53#53(203.0.113.53)')
+    expect(text).toMatch(/;; MSG SIZE {2}rcvd: \d+/)
+    expect(text).toContain('ⓘ CNAME: www.careconnect.example is an alias for careconnect.example, so the resolver looked that name up too.')
+    expect(text).toContain('ⓘ 300 and 3600 are TTLs: how many seconds a resolver may keep this answer in its cache.')
+    expect(text.indexOf('ⓘ CNAME')).toBeLessThan(text.indexOf('ⓘ A:'))
+    expect(captures.filter((c) => c.app === 'DNS')).toHaveLength(2)
+  })
+
+  it('dig MX, AAAA, NS, TXT and +short', () => {
+    expect(run('patient', 'dig careconnect.example MX').text).toContain('MX\t10 mail.careconnect.example.')
+    expect(run('patient', 'dig careconnect.example AAAA').text).toContain('AAAA\t2001:db8:cc::80')
+    expect(run('patient', 'dig careconnect.example NS').text).toContain('NS\tns1.careconnect.example.')
+    expect(run('patient', 'dig careconnect.example TXT').text).toContain('TXT\t"v=spf1 mx -all"')
+    expect(run('patient', 'dig +short www.careconnect.example').text).toBe('careconnect.example.\n203.0.113.80')
+    const { captures } = run('patient', 'dig careconnect.example MX')
+    const dns = captures.filter((c) => c.app === 'DNS')
+    expect(dns[0]!.info).toMatch(/^Standard query 0x[0-9a-f]{4} MX careconnect\.example$/)
+    expect(dns[1]!.info).toMatch(/^Standard query response 0x[0-9a-f]{4} MX careconnect\.example MX 10 mail\.careconnect\.example$/)
+  })
+
+  it('dig for a name that does not exist: status NXDOMAIN', () => {
+    const { text } = run('patient', 'dig nope.careconnect.example')
+    expect(text).toContain('status: NXDOMAIN')
+    expect(text).toContain('ⓘ NXDOMAIN: no such name')
+  })
+
+  it('a public name is not authoritative: no aa flag', () => {
+    const { text } = run('patient', 'dig example.com')
+    expect(text).toContain(';; flags: qr rd ra;')
+    expect(text).toContain('93.184.216.34')
+  })
+
+  it('dig @server asks that server', () => {
+    const net = careConnect()
+    const { text } = run('patient', 'dig @203.0.113.99 www.careconnect.example', net)
+    expect(text).toContain(';; connection timed out; no servers could be reached')
+  })
+
+  it('dig with the DNS server offline times out after three queries', () => {
+    const net = careConnect()
+    const dns = net.nodes.find((n) => n.id === 'ccdns')!
+    dns.data = { ...dns.data, isOn: false }
+    const { text, captures } = run('patient', 'dig www.careconnect.example', net)
+    expect(text).toContain(';; connection timed out; no servers could be reached')
+    expect(captures.filter((c) => c.app === 'DNS')).toHaveLength(3)
+  })
+
+  it('nslookup -type=mx|aaaa|ns|txt|cname, and a CNAME in a plain lookup', () => {
+    expect(run('patient', 'nslookup -type=mx careconnect.example').text).toContain('careconnect.example\tmail exchanger = 10 mail.careconnect.example.')
+    expect(run('patient', 'nslookup -type=aaaa careconnect.example').text).toContain('careconnect.example\thas AAAA address 2001:db8:cc::80')
+    expect(run('patient', 'nslookup -type=ns careconnect.example').text).toContain('careconnect.example\tnameserver = ns1.careconnect.example.')
+    expect(run('patient', 'nslookup -type=txt careconnect.example').text).toContain('careconnect.example\ttext = "v=spf1 mx -all"')
+    expect(run('patient', 'nslookup -type=cname www.careconnect.example').text).toContain('www.careconnect.example\tcanonical name = careconnect.example.')
+    const plain = run('patient', 'nslookup www.careconnect.example').text
+    expect(plain).toContain('www.careconnect.example\tcanonical name = careconnect.example.')
+    expect(plain).toContain('Address:  203.0.113.80')
+    expect(run('patient', 'nslookup -type=mx files.careconnect.example').text).toContain("*** Can't find files.careconnect.example: No answer")
+  })
+})

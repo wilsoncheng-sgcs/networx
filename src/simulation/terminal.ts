@@ -12,6 +12,7 @@ import { cmdCurl } from './protocols/web'
 import { cmdFtp, cmdSftp, sshHandshake, sshEncrypted } from './protocols/files'
 import { cmdPop3, cmdImap, cmdSmtp, cmdMail } from './protocols/mail'
 import { cmdSs, cmdNetstat } from './protocols/ports'
+import { cmdDig, cmdNslookup } from './protocols/dnsTools'
 import { isListening, servicesFor } from './services'
 
 export type { TermContext } from './context'
@@ -271,51 +272,6 @@ function cmdIfconfig(_args: string[], ctx: TermContext): Lines {
   ]
 }
 
-function cmdNslookup(args: string[], ctx: TermContext): Lines {
-  const domain = args[0]
-  if (!domain) return [err('Usage: nslookup <domain>')]
-  const timedOut = (r: Resolution & { explain?: string }, at: number): Lines => [
-    err(';; connection timed out; no servers could be reached', at),
-    ...(r.explain ? [info(r.explain, at)] : []),
-  ]
-
-  if (isIp(domain)) {
-    // Reverse lookup needs PTR records, which Networx's DNS server doesn't hold
-    const serverIp = dnsServerIpOf(ctx)
-    if (!serverIp) return [out('Server:   (none)'), out(''), err(';; connection timed out; no servers could be reached')]
-    const arpa = `${domain.split('.').reverse().join('.')}.in-addr.arpa`
-    return [
-      out(`Server:   ${serverIp}`),
-      out(`Address:  ${serverIp}#53`),
-      out(''),
-      out(`** server can't find ${arpa}: NXDOMAIN`),
-    ]
-  }
-
-  const r = resolveTarget(domain, ctx)
-  if (isResolveError(r) && r.error === 'no-dns') {
-    return [out('Server:   (none)'), out(''), ...timedOut(r, 0)]
-  }
-  if (isResolveError(r) && r.error === 'timeout') {
-    // The query went out three times and nothing came back
-    return playLookup(r, ctx, timedOut(r, 0)).lines
-  }
-  const afterDns = animateDns(r, ctx)
-
-  const lines: Lines = [
-    out(`Server:   ${r.dnsServerIp}`),
-    out(`Address:  ${r.dnsServerIp}#53`),
-    out(''),
-  ]
-  if (isResolveError(r)) {
-    lines.push(out(`** server can't find ${domain}: NXDOMAIN`))
-  } else {
-    if (!r.authoritative) lines.push(out('Non-authoritative answer:'))
-    lines.push(out(`Name:     ${domain}`), out(`Address:  ${r.ip}`))
-  }
-  return delayLines(lines, afterDns)
-}
-
 function cmdArp(args: string[], ctx: TermContext): Lines {
   const node = self(ctx)
   if (args[0] === '-d') {
@@ -530,7 +486,9 @@ function cmdHelp(): Lines {
     out('  route                          Show routing table'),
     out('  dhclient / ipconfig /renew     Get an IP address by DHCP'),
     out('Name lookup'),
-    out('  nslookup <name>                Ask the DNS server for an address'),
+    out('  nslookup [-type=mx] <name>     Ask the DNS server for an address (or other records)'),
+    out('  dig [@server] <name> [type]    Ask the DNS server, showing the whole answer'),
+    out('       types: A AAAA CNAME MX NS TXT    +short  values only'),
     out('Web'),
     out('  curl [-v] http(s)://<host>     Fetch a page (-v shows every step)'),
     out('       -I  headers only     -k  carry on past a bad certificate'),
@@ -569,6 +527,7 @@ export function runCommand(raw: string, baseCtx: TermContext): TerminalLine[] {
     case 'ipconfig': return cmdIpconfig(args, ctx)
     case 'ifconfig': return cmdIfconfig(args, ctx)
     case 'nslookup': return cmdNslookup(args, ctx)
+    case 'dig': return cmdDig(args, ctx)
     case 'arp': return cmdArp(args, ctx)
     case 'netstat': return cmdNetstat(args, ctx)
     case 'ss': return cmdSs(args, ctx)
