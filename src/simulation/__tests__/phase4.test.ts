@@ -69,3 +69,30 @@ describe('A1 — an unreachable DNS server times out; it never becomes 8.8.8.8',
     expect(text).toContain('93.184.216.34')
   })
 })
+
+describe('A2 — traceroute shows only devices that route', () => {
+  const hopLines = (text: string) => text.split('\n').filter((l) => /^ \d+ {2}/.test(l))
+
+  it("Patient's Laptop → 203.0.113.80: Home Gateway, three backbone hops, CareConnect Router, CareConnect Web", () => {
+    const hops = hopLines(run('patient', 'traceroute 203.0.113.80').text)
+    expect(hops.map((l) => l.match(/\((.*?)\)/)![1])).toEqual([
+      'Home Gateway', 'ISP Gateway', 'Backbone router', 'Exchange point', 'CareConnect Router', 'CareConnect Web',
+    ])
+    expect(hops[0]).toContain('192.168.1.1')
+    expect(hops[4]).toContain('198.51.100.1')   // the interface the probe arrived on
+    expect(hops.join('\n')).not.toContain('Server Switch')
+    expect(hops.join('\n')).not.toContain('0.0.0.0')
+  })
+
+  it("same subnet (through the Clinic Gateway's built-in switch) is one line: the destination", () => {
+    const hops = hopLines(run('docpc', 'traceroute 10.0.0.11').text)
+    expect(hops).toHaveLength(1)
+    expect(hops[0]).toContain('10.0.0.11 (Reception PC)')
+  })
+
+  it('a hostname on the internet: the local routers, the backbone, then the host', () => {
+    const hops = hopLines(run('patient', 'traceroute example.com').text)
+    expect(hops.map((l) => l.match(/\((.*?)\)/)![1])).toEqual(['Home Gateway', 'ISP Gateway', 'Backbone router', 'Exchange point', 'example.com'])
+  })
+})
+

@@ -4,7 +4,7 @@ import { type TermContext, type Lines, out, err, info, self, delayLines } from '
 import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
 import { resolveTarget, isResolveError, isIp, dnsServerIpOf, routeTo, nodeForIp, type Resolution } from './resolve'
 import { playLookup } from './lookup'
-import { errnoText, findSegmentPath, type Route } from './routing'
+import { errnoText, findSegmentPath, isRoutingHop, INTERNET_HOPS, type Route } from './routing'
 import { playUnreachable } from './unreachable'
 import { tokenize } from './tokenize'
 import { runConversations, hostKeyFingerprint, newConversation, tcpOpen, tcpRefused } from './exchange'
@@ -40,13 +40,6 @@ function resolveErrorText(cmd: string, r: Resolution & { error: string }): strin
     default:         return `${cmd}: sendmsg: No route to host`
   }
 }
-
-// Simulated internet backbone hops shown in traceroute
-const INTERNET_HOPS = [
-  { ip: '195.68.128.1',  label: 'ISP Gateway'       },
-  { ip: '62.115.52.22',  label: 'Backbone router'    },
-  { ip: '108.170.252.1', label: 'Exchange point'     },
-]
 
 // ─── Command implementations ───────────────────────────────────────────────
 
@@ -138,17 +131,39 @@ function pingFailure(route: Extract<Route, { ok: false }>, target: string, ip: s
   return playUnreachable(route, { kind: 'icmp' }, ip, ctx, body, startMs).lines
 }
 
-/** One traceroute line per device after the first on `path`, numbered from `first`. */
-function tracerouteHops(path: string[], ctx: TermContext, first = 1): Lines {
-  const WAN_SIDE_TYPES = ['router', 'gateway', 'cloud', 'firewall']
-  return path.slice(1).map((nodeId, i) => {
-    const node = nodeById(nodeId, ctx.nodes)
-    const prevNode = nodeById(path[i]!, ctx.nodes)
-    const fromWan = WAN_SIDE_TYPES.includes(prevNode?.data.deviceType ?? '')
-    const ip = (fromWan && node?.data.wanIp) ? node.data.wanIp : (node?.data.ip || node?.data.label || '*')
-    const rtt = simulatePingRtt(i + 1)
-    return out(` ${first + i}  ${ip} (${node?.data.label ?? ''})  ${rtt} ms  ${rtt + 1} ms  ${rtt} ms`)
-  })
+/**
+ * traceroute's lines for `path`: one per device that routes (each one lowers the TTL, so each one
+ * answers a probe), addressed by the interface the probe arrived on; the Internet node as its backbone
+ * routers. Switches, hubs and access points never appear. With `dst`, the last line is the destination;
+ * without it the probes die at the end of `path` (and an Internet node there drops them at the ISP).
+ */
+function tracerouteHops(path: string[], ctx: TermContext, dst?: { ip: string; label: string }): Lines {
+  const lines: Lines = []
+  let n = 0
+  let pastInternet = false
+  const hop = (ip: string, label: string) => {
+    n++
+    const rtt = pastInternet ? 15 + n * 4 + Math.floor(Math.random() * 4) : simulatePingRtt(n)
+    lines.push(out(` ${n}  ${ip} (${label})  ${rtt} ms  ${rtt + 1} ms  ${rtt} ms`))
+  }
+  for (let i = 1; i < path.length; i++) {
+    const node = nodeById(path[i]!, ctx.nodes)
+    if (!node) continue
+    const last = i === path.length - 1
+    if (node.data.deviceType === 'cloud') {
+      const backbone = last && !dst ? INTERNET_HOPS.slice(0, 1) : INTERNET_HOPS
+      backbone.forEach((h) => hop(h.ip, h.label))
+      pastInternet = true
+      if (last && dst) hop(dst.ip, dst.label)
+      continue
+    }
+    if (last && dst) { hop(dst.ip, node.data.label); continue }
+    if (!isRoutingHop(path, i, ctx.nodes)) continue
+    const prev = nodeById(path[i - 1]!, ctx.nodes)
+    const fromWan = ['router', 'gateway', 'cloud', 'firewall'].includes(prev?.data.deviceType ?? '')
+    hop((fromWan && node.data.wanIp) ? node.data.wanIp : (node.data.ip || '*'), node.data.label)
+  }
+  return lines
 }
 
 function cmdTraceroute(args: string[], ctx: TermContext): Lines {
@@ -173,10 +188,7 @@ function cmdTraceroute(args: string[], ctx: TermContext): Lines {
     } else if ((route.failure === 'private' || route.failure === 'not-on-network' || route.failure === 'no-reply') && route.reach) {
       // The devices on the way still answer; after that, silence
       const answered = route.failure === 'no-reply' ? route.reach.slice(0, -1) : route.reach
-      const cloudAt = answered.findIndex((id) => nodeById(id, ctx.nodes)?.data.deviceType === 'cloud')
-      const hops = cloudAt > 0
-        ? [...tracerouteHops(answered.slice(0, cloudAt), ctx), out(` ${cloudAt}  ${INTERNET_HOPS[0]!.ip} (${INTERNET_HOPS[0]!.label})  ${12 + cloudAt * 3} ms  ${13 + cloudAt * 3} ms  ${12 + cloudAt * 3} ms`)]
-        : tracerouteHops(answered, ctx)
+      const hops = tracerouteHops(answered, ctx)
       body = [header, ...hops, ...silent(hops.length + 1), ...explain]
     } else {
       body = [header, ...silent(1), ...explain]
@@ -188,19 +200,8 @@ function cmdTraceroute(args: string[], ctx: TermContext): Lines {
 
   ctx.dispatchPackets?.(startAfter(makePacketsWithArp(src, dst, path, ctx, 'ICMP', 'ICMP'), afterDns))
 
-  const body: Lines = [header, ...tracerouteHops(path, ctx)]
-  let hopNum = path.length
-
-  if (dst.data.deviceType === 'cloud') {
-    // Simulated internet backbone hops, then the host itself
-    INTERNET_HOPS.forEach((hop, i) => {
-      const rtt = 15 + hopNum * 4 + i * 3 + Math.floor(Math.random() * 4)
-      body.push(out(` ${hopNum}  ${hop.ip} (${hop.label})  ${rtt} ms  ${rtt + 2} ms  ${rtt + 1} ms`))
-      hopNum++
-    })
-    const finalRtt = 30 + Math.floor(Math.random() * 10)
-    body.push(out(` ${hopNum}  ${r.ip} (${target})  ${finalRtt} ms  ${finalRtt + 1} ms  ${finalRtt} ms`))
-  }
+  const label = dst.data.deviceType === 'cloud' ? target : dst.data.label
+  const body: Lines = [header, ...tracerouteHops(path, ctx, { ip: r.ip, label })]
   return [...lines, ...delayLines(body, afterDns)]
 }
 

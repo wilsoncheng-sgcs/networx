@@ -231,6 +231,42 @@ function onNetwork(router: NetNode, ip: string): boolean {
   return !!router.data.wanIp && sameSubnet(router.data.wanIp, ip, '255.255.255.0')
 }
 
+/**
+ * Does the device at `path[i]` route the packet (forward it between networks, lowering its TTL)?
+ * Routers and firewalls always do; a home/office gateway only between its LAN and WAN sides — between
+ * two of its LAN devices it is just a switch. Switches, hubs and access points never do.
+ */
+export function isRoutingHop(path: string[], i: number, nodes: NetNode[]): boolean {
+  const type = (id: string | undefined) => nodes.find((n) => n.id === id)?.data.deviceType ?? ''
+  const t = type(path[i])
+  if (t === 'router' || t === 'firewall') return true
+  if (t !== 'gateway') return false
+  return ROUTING_TYPES.includes(type(path[i - 1])) || ROUTING_TYPES.includes(type(path[i + 1]))
+}
+
+/** Simulated internet backbone routers the Internet node stands for (traceroute shows them; each lowers the TTL). */
+export const INTERNET_HOPS = [
+  { ip: '195.68.128.1',  label: 'ISP Gateway'    },
+  { ip: '62.115.52.22',  label: 'Backbone router' },
+  { ip: '108.170.252.1', label: 'Exchange point'  },
+]
+
+/**
+ * The TTL a packet arrives with after travelling `path` from a sender that starts at 64:
+ * one less for every router on the way, and three less for the internet's backbone.
+ * A path ending at the Internet node (an internet host) crosses the backbone too.
+ */
+export function ttlAfter(path: string[], nodes: NetNode[], start = 64): number {
+  let ttl = start
+  for (let i = 1; i < path.length; i++) {
+    const last = i === path.length - 1
+    const t = nodes.find((n) => n.id === path[i])?.data.deviceType
+    if (t === 'cloud') ttl -= INTERNET_HOPS.length
+    else if (!last && isRoutingHop(path, i, nodes)) ttl -= 1
+  }
+  return ttl
+}
+
 /** Short system error text for a failure, as tools print it. */
 export function errnoText(failure: RouteFailure): string {
   switch (failure) {
