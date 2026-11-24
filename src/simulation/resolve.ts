@@ -69,6 +69,8 @@ export interface Resolved {
   query?: DnsQuery
   /** Answered from this device's DNS cache: nothing was sent. */
   cached?: boolean
+  /** DNS servers asked first that never answered (the alternate answered). */
+  failedFirst?: DnsTimeout[]
 }
 
 export interface ResolveError {
@@ -86,6 +88,7 @@ export interface ResolveError {
   query?: DnsQuery
   timeout?: DnsTimeout
   cached?: boolean
+  failedFirst?: DnsTimeout[]
 }
 
 export type Resolution = Resolved | ResolveError
@@ -140,6 +143,13 @@ export function defaultDnsServer(self: NetNode, nodes: NetNode[], edges: NetEdge
     return (routed ?? dnsNodes[0]!).data.ip
   }
   return nodes.some((n) => n.data.deviceType === 'cloud') ? PUBLIC_RESOLVER_IP : ''
+}
+
+/** The DNS servers this device asks, in order: its DNS server, then its alternate. */
+export function dnsServersOf(ctx: TermContext): string[] {
+  const me = nodeById(ctx.selfId, ctx.nodes)
+  const alt = typeof me?.data.dnsAlternate === 'string' ? me.data.dnsAlternate.trim() : ''
+  return [dnsServerIpOf(ctx), alt].filter((ip, i, all) => ip && all.indexOf(ip) === i)
 }
 
 /** The DNS server address this device is configured to ask ('' = none). */
@@ -212,8 +222,17 @@ function askDnsServer(ctx: TermContext, qtype: DnsRecordType, serverOverride?: s
 }
 
 /** The records a server holds itself (it is authoritative for these). The internet's resolver holds none. */
-function zoneOf(server: NetNode): DnsRecord[] {
-  return server.data.deviceType === 'dns' ? server.data.dnsRecords ?? [] : []
+function zoneOf(server: NetNode, ctx: TermContext): DnsRecord[] {
+  if (server.data.deviceType !== 'dns') return []
+  const primary = primaryOf(server, ctx.nodes)
+  // A secondary copies its primary's records while both are online, and keeps serving its copy if the primary goes down
+  return primary && primary.data.isOn !== false ? primary.data.dnsRecords ?? [] : server.data.dnsRecords ?? []
+}
+
+/** The primary DNS server a secondary copies its records from, if it is one. */
+export function primaryOf(server: NetNode, nodes: NetNode[]): NetNode | undefined {
+  const ip = server.data.dnsPrimary?.trim()
+  return ip ? nodes.find((n) => n.id !== server.id && n.data.deviceType === 'dns' && n.data.ip === ip) : undefined
 }
 
 /** The well-known internet names Networx knows, as A records. */
@@ -232,7 +251,7 @@ function lookupElsewhere(server: NetNode, ctx: TermContext): (name: string) => A
   const internetZones = ctx.nodes.filter((n) => n.data.deviceType === 'dns' && n.data.isOn !== false && n.data.ip && !isPrivateIp(n.data.ip))
   return (name) => {
     for (const z of internetZones) {
-      const held = zoneOf(z).filter((r) => normName(r.name) === name)
+      const held = zoneOf(z, ctx).filter((r) => normName(r.name) === name)
       if (held.length) return held.map((r) => ({ name, type: r.type, value: r.value.trim(), ttl: r.ttl, ...(r.type === 'MX' ? { priority: r.priority ?? 10 } : {}) }))
     }
     return publicRecords(name)
@@ -241,15 +260,15 @@ function lookupElsewhere(server: NetNode, ctx: TermContext): (name: string) => A
 
 /** What a server answers for `name` and `qtype`. */
 export function serverAnswer(server: NetNode, name: string, qtype: DnsRecordType, ctx: TermContext): DnsAnswer {
-  return answerQuery(zoneOf(server), lookupElsewhere(server, ctx), name, qtype)
+  return answerQuery(zoneOf(server, ctx), lookupElsewhere(server, ctx), name, qtype)
 }
 
 /** The result of asking this device's DNS server one question. */
 export type DnsLookup =
-  | { kind: 'answer'; answer: DnsAnswer; query: DnsQuery }
+  | { kind: 'answer'; answer: DnsAnswer; query: DnsQuery; failedFirst?: DnsTimeout[] }
   /** From this device's cache: nothing sent; TTLs counted down; `remaining` seconds until it expires. */
   | { kind: 'cached'; answer: DnsAnswer; serverIp: string; remaining: number }
-  | { kind: 'timeout'; timeout: DnsTimeout; explain: string }
+  | { kind: 'timeout'; timeout: DnsTimeout; explain: string; failedFirst?: DnsTimeout[] }
   | { kind: 'no-dns'; explain: string }
 
 export interface LookupOptions {
@@ -266,15 +285,28 @@ export function lookupName(name: string, qtype: DnsRecordType, ctx: TermContext,
     const hit = cacheGet(ctx.selfId, name, qtype)
     if (hit) return { kind: 'cached', answer: hit.answer, serverIp: hit.serverIp, remaining: hit.remaining }
   }
-  const asked = askDnsServer(ctx, qtype, opts.serverIp)
-  if (!asked) {
+  // The DNS server first; if it never answers (three tries), the alternate
+  const servers = opts.serverIp ? [opts.serverIp] : dnsServersOf(ctx)
+  if (!servers.length) {
     const me = nodeById(ctx.selfId, ctx.nodes)
     return { kind: 'no-dns', explain: `ⓘ ${me?.data.label ?? 'This device'} has no DNS server to ask, so names can't be turned into IP addresses. Connecting by IP address still works.` }
   }
-  if (!asked.ok) return { kind: 'timeout', timeout: asked.timeout, explain: asked.explain }
-  const answer = serverAnswer(asked.server, name, qtype, ctx)
-  if (useCache) cachePut(ctx.selfId, name, qtype, answer, asked.serverIp)
-  return { kind: 'answer', answer, query: { server: asked.server, serverIp: asked.serverIp, path: asked.path, qtype, answer, id: newTransactionId() } }
+  const failedFirst: DnsTimeout[] = []
+  for (const [i, serverIp] of servers.entries()) {
+    const asked = askDnsServer(ctx, qtype, serverIp)!
+    if (!asked.ok) {
+      if (i < servers.length - 1) { failedFirst.push(asked.timeout); continue }
+      const explain = failedFirst.length
+        ? `ⓘ Neither DNS server answered (${servers.join(', ')}), so the name couldn't be turned into an IP address. Connecting by IP address still works.`
+        : asked.explain
+      return { kind: 'timeout', timeout: asked.timeout, explain, ...(failedFirst.length ? { failedFirst } : {}) }
+    }
+    const answer = serverAnswer(asked.server, name, qtype, ctx)
+    if (useCache) cachePut(ctx.selfId, name, qtype, answer, asked.serverIp)
+    const query = { server: asked.server, serverIp: asked.serverIp, path: asked.path, qtype, answer, id: newTransactionId() }
+    return { kind: 'answer', answer, query, ...(failedFirst.length ? { failedFirst } : {}) }
+  }
+  throw new Error('unreachable')
 }
 
 /**
@@ -293,12 +325,12 @@ export function resolveTarget(nameOrIp: string, ctx: TermContext): Resolution {
   const looked = lookupName(nameOrIp, 'A', ctx)
   if (looked.kind === 'no-dns') return { name, error: 'no-dns', dnsServerNode: null, dnsServerIp: null, explain: looked.explain }
   if (looked.kind === 'timeout') {
-    return { name, error: 'timeout', dnsServerNode: looked.timeout.server, dnsServerIp: looked.timeout.serverIp, explain: looked.explain, timeout: looked.timeout }
+    return { name, error: 'timeout', dnsServerNode: looked.timeout.server, dnsServerIp: looked.timeout.serverIp, explain: looked.explain, timeout: looked.timeout, failedFirst: looked.failedFirst }
   }
   const answer = looked.answer
   const query = looked.kind === 'answer' ? looked.query : undefined
   const asked = query
-    ? { name, dnsServerNode: query.server, dnsServerIp: query.serverIp, query }
+    ? { name, dnsServerNode: query.server, dnsServerIp: query.serverIp, query, failedFirst: looked.kind === 'answer' ? looked.failedFirst : undefined }
     : { name, dnsServerNode: null, dnsServerIp: null, cached: true }
   if (answer.status === 'NXDOMAIN') return { ...asked, error: 'nxdomain' }
   if (answer.status === 'SERVFAIL') {

@@ -7,6 +7,7 @@ import { setAnimSpeed, setStepping, scaledHop } from '../simulation/packets'
 import * as clock from '../simulation/clock'
 import { makeDefaultData, normaliseNetwork } from '../simulation/defaults'
 import { clearAllDnsCaches } from '../simulation/dnsCache'
+import { primaryOf } from '../simulation/resolve'
 import type { Preset } from '../simulation/presets'
 
 const STORAGE_KEY = 'networx-state-v1'
@@ -22,6 +23,16 @@ function loadSpeed(): AnimSpeed {
     if (n === 0.5 || n === 1 || n === 3) return n
   } catch { /* storage unavailable */ }
   return 1
+}
+
+/** A secondary DNS server copies its primary's records while both are online (it keeps its copy otherwise). */
+function syncSecondaries(nodes: NetNode[]): NetNode[] {
+  return nodes.map((n) => {
+    if (n.data.deviceType !== 'dns' || !n.data.dnsPrimary || n.data.isOn === false) return n
+    const primary = primaryOf(n, nodes)
+    if (!primary || primary.data.isOn === false || primary.data.dnsRecords === n.data.dnsRecords) return n
+    return { ...n, data: { ...n.data, dnsRecords: primary.data.dnsRecords.map((r) => ({ ...r })) } }
+  })
 }
 
 let idCounter = 100
@@ -192,9 +203,9 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
 
   updateNodeData: (id, patch) =>
     set((s) => ({
-      nodes: s.nodes.map((n) =>
+      nodes: syncSecondaries(s.nodes.map((n) =>
         n.id === id ? { ...n, data: { ...n.data, ...patch } } : n,
-      ),
+      )),
     })),
 
   selectNode: (id) => set({ selectedNodeId: id }),

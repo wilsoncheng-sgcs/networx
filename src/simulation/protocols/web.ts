@@ -3,7 +3,7 @@ import { type TermContext, type Lines, out, err, info, self } from '../context'
 import { resolveTarget, isResolveError, isIp, routeTo } from '../resolve'
 import { errnoText } from '../routing'
 import { playUnreachable } from '../unreachable'
-import { playLookup } from '../lookup'
+import { playLookup, playFailedServers } from '../lookup'
 import { isListening } from '../services'
 import {
   type Step, type CertInfo, type CertProblem, type Leg,
@@ -177,7 +177,8 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
   }
 
   const dnsLeg = dnsConversation(r, ctx, resolvedLines)
-  if (dnsLeg) legs.push(dnsLeg)
+  // DNS servers that never answered come first; the leg to the alternate waits for them
+  if (dnsLeg) legs.push({ ...dnsLeg, waitMs: playFailedServers(r, ctx) })
   const immediate: Lines = dnsLeg ? [] : resolvedLines
 
   // 2. Is anything listening on that port?

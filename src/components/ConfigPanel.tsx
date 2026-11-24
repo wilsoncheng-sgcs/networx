@@ -151,7 +151,10 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
                 <Field label="Subnet Mask" value={data.subnet} onChange={(v) => upd({ subnet: v })} placeholder="255.255.255.0" mono />
                 <Field label="Default Gateway" value={data.gateway} onChange={(v) => upd({ gateway: v })} placeholder="192.168.1.1" mono />
                 {isHost && (
-                  <Field label="DNS Server" value={data.dnsServer ?? ''} onChange={(v) => upd({ dnsServer: v.trim() })} placeholder="e.g. 8.8.8.8" mono />
+                  <>
+                    <Field label="DNS Server" value={data.dnsServer ?? ''} onChange={(v) => upd({ dnsServer: v.trim() })} placeholder="e.g. 8.8.8.8" mono />
+                    <Field label="Alternate DNS Server" value={data.dnsAlternate ?? ''} onChange={(v) => upd({ dnsAlternate: v.trim() })} placeholder="asked if the first doesn't answer" mono />
+                  </>
                 )}
                 <div className="flex flex-col gap-1">
                   <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">MAC Address</label>
@@ -340,7 +343,19 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
         )}
 
         {tab === 'records' && isDns && (
-          <RecordsTab records={data.dnsRecords ?? []} onChange={(dnsRecords) => upd({ dnsRecords })} />
+          <>
+            <SecondaryToggle
+              node={node}
+              nodes={nodes}
+              onChange={(dnsPrimary) => {
+                const primary = nodes.find((n) => n.id !== node.id && n.data.deviceType === 'dns' && n.data.ip === dnsPrimary)
+                upd(dnsPrimary && primary ? { dnsPrimary, dnsRecords: primary.data.dnsRecords.map((r) => ({ ...r })) } : { dnsPrimary: dnsPrimary ?? '' })
+              }}
+            />
+            {data.dnsPrimary
+              ? <RecordsTable records={data.dnsRecords ?? []} />
+              : <RecordsTab records={data.dnsRecords ?? []} onChange={(dnsRecords) => upd({ dnsRecords })} />}
+          </>
         )}
 
         {tab === 'files' && isFile && (
@@ -901,6 +916,64 @@ function RecordsTab({ records, onChange }: { records: DnsRecord[]; onChange: (r:
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+/** A DNS server can be a secondary: it copies another server's records (read-only here). */
+function SecondaryToggle({ node, nodes, onChange }: { node: NetNode; nodes: NetNode[]; onChange: (primaryIp: string | null) => void }) {
+  const others = nodes.filter((n) => n.id !== node.id && n.data.deviceType === 'dns' && n.data.ip)
+  const on = !!node.data.dnsPrimary
+  const [ip, setIp] = useState(node.data.dnsPrimary || others[0]?.data.ip || '')
+  const primary = others.find((n) => n.data.ip === node.data.dnsPrimary)
+  return (
+    <div className="border border-gray-100 rounded-lg p-3 mb-3 bg-gray-50 space-y-2">
+      <label className="flex items-center gap-2 text-xs font-medium text-gray-700">
+        <input type="checkbox" checked={on} onChange={(e) => onChange(e.target.checked ? ip : null)} data-testid="dns-secondary" />
+        Copy records from (primary):
+        <input
+          className="w-32 border border-gray-200 rounded px-1.5 py-0.5 text-xs font-mono bg-white"
+          value={on ? node.data.dnsPrimary : ip}
+          onChange={(e) => { setIp(e.target.value.trim()); if (on) onChange(e.target.value.trim()) }}
+          placeholder="203.0.113.53"
+          data-testid="dns-primary-ip"
+        />
+      </label>
+      {on && (
+        <p className="text-[11px] text-gray-500">
+          {primary
+            ? `A secondary: it copies ${primary.data.label}'s records while both are online, and keeps answering with its copy if the primary goes offline.`
+            : 'No DNS server has that address yet.'}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/** The records, read-only (a secondary's copy). */
+function RecordsTable({ records }: { records: DnsRecord[] }) {
+  return (
+    <div className="border border-gray-100 rounded-lg overflow-hidden">
+      <table className="w-full text-xs">
+        <thead className="bg-gray-50 text-gray-500">
+          <tr>
+            <th className="text-left font-semibold px-2 py-1">Name</th>
+            <th className="text-left font-semibold px-1 py-1">Type</th>
+            <th className="text-left font-semibold px-1 py-1">Value</th>
+            <th className="text-right font-semibold px-2 py-1">TTL</th>
+          </tr>
+        </thead>
+        <tbody>
+          {records.map((r) => (
+            <tr key={r.id} data-testid="dns-record-row" className="border-t border-gray-100">
+              <td className="px-2 py-1 font-mono break-all">{r.name}</td>
+              <td className="px-1 py-1 font-mono font-semibold text-gray-600">{r.type}</td>
+              <td className="px-1 py-1 font-mono break-all">{r.type === 'MX' ? `${r.priority ?? 10} ${r.value}` : r.value}</td>
+              <td className="px-2 py-1 font-mono text-right">{r.ttl}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

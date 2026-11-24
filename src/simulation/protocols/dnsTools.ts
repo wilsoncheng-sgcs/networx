@@ -103,9 +103,9 @@ export function cmdDig(args: string[], ctx: TermContext): Lines {
   if (looked.kind !== 'answer') {
     const fail = [err(';; connection timed out; no servers could be reached'), info(looked.explain)]
     if (looked.kind === 'no-dns') return [...(short ? [] : banner), ...fail]
-    return [...(short ? [] : banner), ...playLookup({ name, timeout: looked.timeout }, ctx, fail).lines]
+    return [...(short ? [] : banner), ...playLookup({ name, timeout: looked.timeout, failedFirst: looked.failedFirst }, ctx, fail).lines]
   }
-  return playLookup({ name, query: looked.query }, ctx, digAnswer(name, qtype, looked, { short, banner, ctx })).lines
+  return playLookup({ name, query: looked.query, failedFirst: looked.failedFirst }, ctx, digAnswer(name, qtype, looked, { short, banner, ctx })).lines
 }
 
 function digAnswer(name: string, qtype: DnsRecordType, looked: Extract<DnsLookup, { kind: 'answer' | 'cached' }>, o: { short: boolean; banner: Lines; ctx: TermContext }): Lines {
@@ -167,7 +167,7 @@ export function cmdNslookup(args: string[], ctx: TermContext): Lines {
   const looked = lookupName(domain, qtype, ctx, { useCache: false })
   if (looked.kind === 'cached') return []
   if (looked.kind === 'no-dns') return [out('Server:   (none)'), out(''), ...timedOut(looked.explain)]
-  if (looked.kind === 'timeout') return playLookup({ name: domain, timeout: looked.timeout }, ctx, timedOut(looked.explain)).lines
+  if (looked.kind === 'timeout') return playLookup({ name: domain, timeout: looked.timeout, failedFirst: looked.failedFirst }, ctx, timedOut(looked.explain)).lines
 
   const { answer, query } = looked
   const lines: Lines = [out(`Server:   ${query.serverIp}`), out(`Address:  ${query.serverIp}#53`), out('')]
@@ -178,7 +178,7 @@ export function cmdNslookup(args: string[], ctx: TermContext): Lines {
     if (!answer.authoritative) lines.push(out('Non-authoritative answer:'))
     for (const r of answer.records) lines.push(...nslookupLine(r))
   }
-  const end = playLookup({ name: domain, query }, ctx).endMs
+  const end = playLookup({ name: domain, query, failedFirst: looked.failedFirst }, ctx).endMs
   return delayLines(lines, end)
 }
 
@@ -225,7 +225,9 @@ const tldServer = (tld: string) => ({ name: tld === 'example' ? 'a.tld-servers.e
 function authorityFor(name: string, ctx: TermContext): { node: NetNode; zone: string; ns: string; nsTtl: number } | null {
   const n = normName(name)
   let best: { node: NetNode; zone: string; ns: string; nsTtl: number } | null = null
-  for (const node of ctx.nodes.filter((x) => x.data.deviceType === 'dns' && x.data.ip)) {
+  // Prefer a server that is on (a secondary answers when the primary is off)
+  const dnsNodes = ctx.nodes.filter((x) => x.data.deviceType === 'dns' && x.data.ip).sort((a, b) => Number(a.data.isOn === false) - Number(b.data.isOn === false))
+  for (const node of dnsNodes) {
     const records = node.data.dnsRecords ?? []
     for (const r of records.filter((x) => x.type === 'NS')) {
       const zone = normName(r.name)

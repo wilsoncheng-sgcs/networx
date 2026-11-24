@@ -2,7 +2,7 @@ import type { TerminalLine, PacketAnim, PendingCapture } from '../types'
 import { nodeById, simulatePingRtt, subnetToCidr } from './network'
 import { type TermContext, type Lines, out, err, info, self, delayLines } from './context'
 import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
-import { resolveTarget, isResolveError, isIp, dnsServerIpOf, defaultDnsServer, routeTo, nodeForIp, type Resolution } from './resolve'
+import { resolveTarget, isResolveError, isIp, dnsServersOf, defaultDnsServer, routeTo, nodeForIp, type Resolution } from './resolve'
 import { playLookup } from './lookup'
 import { errnoText, findSegmentPath, isRoutingHop, ttlAfter, INTERNET_HOPS, type Route } from './routing'
 import { playUnreachable } from './unreachable'
@@ -241,7 +241,7 @@ function cmdIpconfig(args: string[], ctx: TermContext): Lines {
     out(`   IPv4 Address . . . . : ${ip || '(not set)'}`),
     out(`   Subnet Mask  . . . . : ${subnet || '255.255.255.0'} (/${cidr})`),
     out(`   Default Gateway  . . : ${gateway || '(not set)'}`),
-    out(`   DNS Servers  . . . . : ${dnsServerIpOf(ctx) || '(not set)'}`),
+    ...(dnsServersOf(ctx).length ? dnsServersOf(ctx) : ['(not set)']).map((ip, i) => out(i ? `                          ${ip}` : `   DNS Servers  . . . . : ${ip}`)),
     out(`   Physical Address . . : ${mac}`),
   ]
 }
@@ -271,7 +271,7 @@ function cmdIfconfig(_args: string[], ctx: TermContext): Lines {
     out(`        Gateway: ${gateway || '(not set)'} (/${cidr})`),
     out(''),
     out('# /etc/resolv.conf'),
-    out(dnsServerIpOf(ctx) ? `nameserver ${dnsServerIpOf(ctx)}` : '# (no DNS server set)'),
+    ...(dnsServersOf(ctx).length ? dnsServersOf(ctx).map((ip) => out(`nameserver ${ip}`)) : [out('# (no DNS server set)')]),
   ]
 }
 

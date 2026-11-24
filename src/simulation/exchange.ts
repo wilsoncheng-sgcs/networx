@@ -397,7 +397,12 @@ function captureFor(
 
 // ── Running Conversations from a command ─────────────────────────────────────
 
-export interface Leg { conv: Conversation; path: string[] }
+export interface Leg {
+  conv: Conversation
+  path: string[]
+  /** Wait this long before this leg starts (e.g. for DNS servers that never answered). */
+  waitMs?: number
+}
 
 /**
  * Play Conversations one after another: dispatch their packets and capture records,
@@ -410,7 +415,8 @@ export function runConversations(
 ): { lines: TerminalLine[]; endMs: number } {
   let t = startMs
   const lines: TerminalLine[] = []
-  for (const { conv, path } of list) {
+  for (const { conv, path, waitMs } of list) {
+    t += waitMs ?? 0
     const r = playConversation(conv, path, ctx, t)
     ctx.dispatchPackets?.(r.packets)
     ctx.dispatchCaptures?.(r.captures)

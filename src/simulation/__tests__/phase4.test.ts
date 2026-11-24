@@ -194,3 +194,57 @@ describe('B1 — each host has a DNS server setting', () => {
     expect(presetNet('star-lan').nodes.find((n) => n.id === 'pc1')!.data.dnsServer).toBe('')
   })
 })
+
+describe('B6 — two DNS servers', () => {
+  /** The lesson: a second DNS server (203.0.113.54) as a secondary, and the Patient's Laptop's alternate DNS server. */
+  function withSecondary(): Net {
+    const net = careConnect()
+    const primary = net.nodes.find((n) => n.id === 'ccdns')!
+    net.nodes.push({
+      ...structuredClone(primary), id: 'ccdns2',
+      data: { ...structuredClone(primary.data), label: 'DNS Server 2', ip: '203.0.113.54', mac: 'aa:bb:cc:02:00:54', dnsPrimary: '203.0.113.53' },
+    })
+    net.edges.push({ id: 'dns2-e1', source: 'ccsw', target: 'ccdns2' })
+    return set(net, 'patient', { dnsAlternate: '203.0.113.54' })
+  }
+
+  it('ipconfig and ifconfig show both DNS servers', () => {
+    const net = withSecondary()
+    expect(run('patient', 'ipconfig', net).text).toMatch(/DNS Servers {2}\. \. \. \. : 203\.0\.113\.53\n {26}203\.0\.113\.54/)
+    expect(run('patient', 'ifconfig', net).text).toContain('nameserver 203.0.113.53\nnameserver 203.0.113.54')
+  })
+
+  it('the first DNS server offline: after its three timeouts the alternate answers, and curl works', () => {
+    const net = set(withSecondary(), 'ccdns', { isOn: false })
+    const { text, captures } = run('patient', 'curl http://www.careconnect.example', net)
+    expect(text).toContain('CareConnect Medical Centre')
+    const dns = captures.filter((c) => c.app === 'DNS')
+    expect(dns.map((c) => `${c.dstIp}:${c.dstPort ?? ''}`).slice(0, 4)).toEqual(['203.0.113.53:53', '203.0.113.53:53', '203.0.113.53:53', '203.0.113.54:53'])
+    expect(dns[4]!.srcIp).toBe('203.0.113.54')
+    expect(dns[4]!.info).toContain('A 203.0.113.80')
+    // The alternate's query waits for the first server's three timeouts
+    expect(dns[3]!.delayMs).toBeGreaterThan(dns[2]!.delayMs)
+  })
+
+  it('the secondary keeps answering with its copy while the primary is off', () => {
+    const net = set(withSecondary(), 'ccdns', { isOn: false })
+    const out = run('patient', 'dig @203.0.113.54 careconnect.example MX', net).text
+    expect(out).toContain('10 mail.careconnect.example.')
+    expect(out).toContain('flags: qr aa rd ra')
+  })
+
+  it('while both are online the secondary mirrors the primary', () => {
+    const net = withSecondary()
+    const primary = net.nodes.find((n) => n.id === 'ccdns')!
+    primary.data = { ...primary.data, dnsRecords: [...primary.data.dnsRecords, { id: 'p1', name: 'portal.careconnect.example', type: 'A', value: '203.0.113.80', ttl: 3600 }] }
+    expect(run('patient', 'dig @203.0.113.54 portal.careconnect.example +short', net).text).toBe('203.0.113.80')
+  })
+
+  it('neither server answers: one timeout after the other', () => {
+    const net = set(set(withSecondary(), 'ccdns', { isOn: false }), 'ccdns2', { isOn: false })
+    const { text, captures } = run('patient', 'nslookup www.careconnect.example', net)
+    expect(text).toContain(';; connection timed out; no servers could be reached')
+    expect(text).toContain('Neither DNS server answered (203.0.113.53, 203.0.113.54)')
+    expect(captures.filter((c) => c.app === 'DNS')).toHaveLength(6)
+  })
+})
