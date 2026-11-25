@@ -3,12 +3,12 @@ import { type TermContext, type Lines, out, err, info, self } from '../context'
 import { resolveTarget, isResolveError, isIp, routeTo } from '../resolve'
 import { errnoText, travelsPartWay } from '../routing'
 import { playUnreachable } from '../unreachable'
-import { playLookup, playFailedServers } from '../lookup'
+import { playLookup, playFailedServers, dnsLegs, withWait } from '../lookup'
 import { isListening } from '../services'
 import {
   type Step, type CertInfo, type CertProblem, type Leg,
   newConversation, tcpOpen, tcpRefused, tcpClose, tlsHandshake, tlsRejected, certificateFor, certProblem, formatCertDate,
-  dnsConversation, runConversations, byteLength,
+  runConversations, byteLength,
 } from '../exchange'
 
 // ── URLs ─────────────────────────────────────────────────────────────────────
@@ -176,10 +176,10 @@ export function fetchUrl(raw: string, ctx: TermContext, opts: FetchOptions = {})
     return { ok: false, url, failure, explain: r.explain, lines: run.lines, endMs: run.endMs }
   }
 
-  const dnsLeg = dnsConversation(r, ctx, resolvedLines)
-  // DNS servers that never answered come first; the leg to the alternate waits for them
-  if (dnsLeg) legs.push({ ...dnsLeg, waitMs: playFailedServers(r, ctx) })
-  const immediate: Lines = dnsLeg ? [] : resolvedLines
+  const dns = dnsLegs(r, ctx, resolvedLines)
+  // DNS servers that never answered come first; the legs to the alternate wait for them
+  legs.push(...withWait(dns, playFailedServers(r, ctx)))
+  const immediate: Lines = dns.length ? [] : resolvedLines
 
   // 2. Is anything listening on that port?
   const server = r.node

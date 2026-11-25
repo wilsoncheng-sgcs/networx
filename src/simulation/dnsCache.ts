@@ -29,7 +29,7 @@ const key = (name: string, qtype: DnsRecordType) => `${normName(name)}|${qtype}`
 
 /** How long an answer may be cached, in seconds (0 = not at all). */
 export function cacheSeconds(answer: DnsAnswer): number {
-  if (answer.status === 'SERVFAIL') return 0
+  if (answer.status === 'SERVFAIL' || answer.status === 'REFUSED') return 0
   if (answer.status === 'NXDOMAIN' || !answer.records.length) return NEGATIVE_TTL
   return Math.min(...answer.records.map((r) => r.ttl))
 }
@@ -90,6 +90,14 @@ export function cacheEntries(nodeId: string): Array<CachedAnswer & { name: strin
 
 export function flushDnsCache(nodeId: string): void {
   caches.delete(nodeId)
+}
+
+/**
+ * The cache a DNS server node keeps of answers it got from its forwarder (kept apart from the cache
+ * of its own resolver, which a command run on the server uses).
+ */
+export function serverCacheId(nodeId: string): string {
+  return `server:${nodeId}`
 }
 
 /** A new network was loaded: no device has cached anything yet. */

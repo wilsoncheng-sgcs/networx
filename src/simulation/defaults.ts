@@ -144,6 +144,8 @@ export function makeDefaultData(type: DeviceType, id: string): NodeData {
     case 'dns':
       base.ip = '192.168.1.53'
       base.label = 'DNS Server'
+      // Names it doesn't hold are forwarded to the public resolver
+      base.dnsForwarder = '8.8.8.8'
       base.dnsRecords = [
         { id: 'dr1', name: 'www.school.local', type: 'A', value: '192.168.1.80', ttl: 3600 },
         { id: 'dr2', name: 'intranet.school.local', type: 'A', value: '192.168.1.81', ttl: 3600 },

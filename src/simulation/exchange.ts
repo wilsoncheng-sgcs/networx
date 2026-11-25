@@ -2,7 +2,6 @@ import type { TerminalLine, PacketAnim, PendingCapture, AppProtocol, NetNode, Ce
 import type { TermContext } from './context'
 import { findPath, nodeById } from './network'
 import { arpBefore, firstHopMacs, leg, populateMacTables, scaledHop } from './packets'
-import type { DnsQuery } from './resolve'
 import type { DnsRecordType } from '../types'
 import { queryInfo, responseInfo, responsePayload, normName, newTransactionId, messageSize, DEFAULT_TTL, type DnsAnswer } from './dns'
 
@@ -103,7 +102,7 @@ export function tcpClose(serverFirst = false): Step[] {
 
 /** A DNS query to port 53 (UDP) and its answer: the response lists every record (a CNAME, then the A ...). */
 export function dnsSteps(id: string, name: string, qtype: DnsRecordType, answer: DnsAnswer): Step[] {
-  const label = answer.status === 'NXDOMAIN' ? 'NXDOMAIN' : answer.status === 'SERVFAIL' ? 'SERVFAIL' : 'DNS reply'
+  const label = answer.status === 'NOERROR' ? 'DNS reply' : answer.status
   return [
     { dir: 'c2s', transport: 'UDP', app: 'DNS', label: 'DNS query',
       info: queryInfo(id, qtype, name),
@@ -331,6 +330,7 @@ export function playConversation(
   path: string[],
   ctx: TermContext,
   startMs = 0,
+  range: [number, number] = [0, conv.steps.length],
 ): PlayResult {
   const client = nodeById(conv.clientId, ctx.nodes)
   const server = nodeById(conv.serverId, ctx.nodes)
@@ -338,7 +338,8 @@ export function playConversation(
   const legMs = (path.length - 1) * hop
 
   populateMacTables(path, ctx)
-  const arp = client && server ? arpBefore(client, server, ctx, startMs) : { packets: [], captures: [], endMs: startMs }
+  const first = range[0] === 0
+  const arp = first && client && server ? arpBefore(client, server, ctx, startMs) : { packets: [], captures: [], endMs: startMs }
 
   const packets: PacketAnim[] = [...arp.packets]
   const captures: PendingCapture[] = [...arp.captures]
@@ -350,6 +351,7 @@ export function playConversation(
 
   let t = arp.endMs
   conv.steps.forEach((step, i) => {
+    if (i < range[0] || i >= range[1]) return
     const back = step.dir === 's2c'
     packets.push(...leg(path, ctx.edges, animProtocol(step), step.label, t, back, hop))
     captures.push({ ...captureFor(conv, step, i, t, clientIp, back ? s2cMacs : c2sMacs), route: back ? reversed : path })
@@ -400,12 +402,23 @@ function captureFor(
 
 // ── Running Conversations from a command ─────────────────────────────────────
 
-export interface Leg {
+/** One Conversation (or some of its Steps) along a path. */
+export interface ConvLeg {
   conv: Conversation
   path: string[]
   /** Wait this long before this leg starts (e.g. for DNS servers that never answered). */
   waitMs?: number
+  /** Play only these Steps [from, to) — the rest of the Conversation is another leg (a DNS server asks upstream in between). */
+  steps?: [number, number]
 }
+
+/** Something else on the wire between Conversations (a query that gets no answer): plays itself from `startMs`. */
+export interface PlayLeg {
+  play: (startMs: number) => { lines: TerminalLine[]; endMs: number }
+  waitMs?: number
+}
+
+export type Leg = ConvLeg | PlayLeg
 
 /**
  * Play Conversations one after another: dispatch their packets and capture records,
@@ -418,13 +431,20 @@ export function runConversations(
 ): { lines: TerminalLine[]; endMs: number } {
   let t = startMs
   const lines: TerminalLine[] = []
-  for (const { conv, path, waitMs } of list) {
-    t += waitMs ?? 0
-    const r = playConversation(conv, path, ctx, t)
+  for (const item of list) {
+    t += item.waitMs ?? 0
+    if ('play' in item) {
+      const p = item.play(t)
+      lines.push(...p.lines)
+      t = p.endMs
+      continue
+    }
+    const { conv, path, steps } = item
+    const r = playConversation(conv, path, ctx, t, steps)
     ctx.dispatchPackets?.(r.packets)
     ctx.dispatchCaptures?.(r.captures)
     lines.push(...r.lines)
-    if (conv.steps[0]?.transport === 'TCP') {
+    if (conv.steps[0]?.transport === 'TCP' && !steps?.[0]) {
       const client = nodeById(conv.clientId, ctx.nodes)
       ctx.recordConnection?.(conv.clientId, {
         localIp: client?.data.ip ?? '',
@@ -436,15 +456,6 @@ export function runConversations(
     t = r.endMs
   }
   return { lines, endMs: t }
-}
-
-/** The DNS Conversation for a resolution — played whenever a DNS server answered, even for NXDOMAIN. */
-export function dnsConversation(r: { name: string; query?: DnsQuery }, ctx: TermContext, lines?: TerminalLine[]): Leg | null {
-  const q = r.query
-  if (!q) return null
-  const steps = dnsSteps(q.id, r.name, q.qtype, q.answer)
-  if (lines) steps[1]!.lines = lines
-  return { conv: newConversation(ctx.selfId, q.server.id, q.serverIp, 53, steps), path: q.path }
 }
 
 /** Path from this device to `server`, or null. */

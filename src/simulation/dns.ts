@@ -92,7 +92,8 @@ export function validateRecord(rec: DnsRecord, others: DnsRecord[]): string | nu
 
 // ── Answering a query ────────────────────────────────────────────────────────
 
-export type DnsStatus = 'NOERROR' | 'NXDOMAIN' | 'SERVFAIL'
+/** REFUSED: the server won't look up a name it doesn't hold (it has no forwarder). */
+export type DnsStatus = 'NOERROR' | 'NXDOMAIN' | 'SERVFAIL' | 'REFUSED'
 
 /** One record in an answer: the record as the server holds it (TTL may be lowered by a cache). */
 export interface AnswerRecord {
@@ -110,24 +111,38 @@ export interface DnsAnswer {
   authoritative: boolean
 }
 
+export interface ForwardOptions {
+  /** Is this name inside a domain the server is authoritative for? It answers those itself (NXDOMAIN if missing). */
+  inZone: (name: string) => boolean
+  /** Ask the server's forwarder for a name outside its domains; the answer is passed on as it came. */
+  forward: (name: string) => DnsAnswer
+}
+
 /**
  * Answer a query from `zone` (the records this server holds, authoritative) and, for names it doesn't
- * hold, `elsewhere` (records it can look up for you: non-authoritative). Follows CNAME chains.
+ * hold, `elsewhere` (records it can look up for you: non-authoritative) — or, with `fwd`, by asking its
+ * forwarder for names outside its own domains. Follows CNAME chains.
  */
 export function answerQuery(
   zone: DnsRecord[],
   elsewhere: (name: string) => AnswerRecord[],
   name: string,
   qtype: DnsRecordType,
+  fwd?: ForwardOptions,
 ): DnsAnswer {
   const records: AnswerRecord[] = []
   const seen = new Set<string>()
   let cur = normName(name)
-  const authoritative = zone.some((r) => normName(r.name) === cur)
+  const authoritative = zone.some((r) => normName(r.name) === cur) || !!fwd?.inZone(cur)
   for (let link = 0; link <= MAX_CNAME_LINKS; link++) {
     if (seen.has(cur)) return { status: 'SERVFAIL', records: [], authoritative: false }  // a CNAME loop
     seen.add(cur)
     const own = zone.filter((r) => normName(r.name) === cur)
+    if (!own.length && fwd && !fwd.inZone(cur)) {
+      // Not one of this server's names: the forwarder's answer finishes it (after any CNAMEs it holds itself)
+      const up = fwd.forward(cur)
+      return { status: up.status, records: [...records, ...up.records], authoritative }
+    }
     const held: AnswerRecord[] = own.length
       ? own.map((r) => ({ name: normName(r.name), type: r.type, value: r.value.trim(), ttl: r.ttl, ...(r.type === 'MX' ? { priority: r.priority ?? 10 } : {}) }))
       : elsewhere(cur)
@@ -190,13 +205,15 @@ export function responseInfo(id: string, qtype: DnsRecordType, name: string, ans
   const q = `${qtype} ${shown(name)}`
   if (answer.status === 'NXDOMAIN') return `Standard query response ${id} No such name ${q}`
   if (answer.status === 'SERVFAIL') return `Standard query response ${id} Server failure ${q}`
+  if (answer.status === 'REFUSED') return `Standard query response ${id} Refused ${q}`
   const parts = answer.records.map((r) => (r.type === 'TXT' ? 'TXT' : `${r.type} ${rdata(r).replace(/\.$/, '')}`))
   return `Standard query response ${id} ${q}${parts.length ? ` ${parts.join(' ')}` : ''}`
 }
 
 /** What is on the wire for a response (the detail pane). */
 export function responsePayload(qtype: DnsRecordType, name: string, answer: DnsAnswer): string {
-  const head = `Reply code: ${answer.status === 'NOERROR' ? 'No error' : answer.status === 'NXDOMAIN' ? 'No such name (NXDOMAIN)' : 'Server failure (SERVFAIL)'}`
+  const code = { NOERROR: 'No error', NXDOMAIN: 'No such name (NXDOMAIN)', SERVFAIL: 'Server failure (SERVFAIL)', REFUSED: 'Refused (REFUSED)' }[answer.status]
+  const head = `Reply code: ${code}`
   const flags = `Authoritative: ${answer.authoritative ? 'yes (this server holds the records)' : 'no'}`
   const q = `Query: ${shown(name)}, type ${qtype}, class IN`
   if (!answer.records.length) return [head, flags, q, 'Answers: none'].join('\n')

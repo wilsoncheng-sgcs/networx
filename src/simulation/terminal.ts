@@ -38,7 +38,8 @@ function resolveErrorText(cmd: string, r: Resolution & { error: string }): strin
     case 'nxdomain': return `${cmd}: cannot resolve ${r.name}: Unknown host`
     case 'no-dns':   return `${cmd}: ${r.name}: Name or service not known`
     case 'timeout':
-    case 'servfail': return `${cmd}: ${r.name}: Temporary failure in name resolution`
+    case 'servfail':
+    case 'refused':  return `${cmd}: ${r.name}: Temporary failure in name resolution`
     case 'nodata':
     case 'no-ipv4':  return `${cmd}: ${r.name}: No address associated with hostname`
     default:         return `${cmd}: sendmsg: No route to host`

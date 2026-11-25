@@ -4,10 +4,17 @@ import { nodeById } from './network'
 import { routeBetween, nodeHasIp, type Route, type Flow } from './routing'
 import { isListening } from './services'
 import { isPrivateIp } from './privateIp'
-import { cacheGet, cachePut } from './dnsCache'
+import { cacheGet, cachePut, serverCacheId } from './dnsCache'
 import { answerQuery, addressOf, normName, newTransactionId, PUBLIC_TTL, type AnswerRecord, type DnsAnswer } from './dns'
 
-/** Well-known internet names, answered (non-authoritatively) when the local DNS server has no record. */
+/**
+ * How long a DNS server waits for its forwarder before giving up and answering SERVFAIL (one query).
+ * 3 s is Windows DNS Server's default forwarder timeout; it is shorter than the client's own 5 s
+ * wait, so the client never has to send its query again.
+ */
+export const FORWARD_TIMEOUT_MS = 3000
+
+/** Well-known internet names, which the public resolver (8.8.8.8) can look up. */
 export const PUBLIC_IPS: Record<string, string> = {
   'google.com':      '142.250.185.46',
   'www.google.com':  '142.250.185.46',
@@ -48,6 +55,26 @@ export interface DnsQuery {
   answer: DnsAnswer
   /** Transaction id, e.g. 0x1a2b. */
   id: string
+  /** The server didn't hold the name, so it asked its forwarder before answering. */
+  forwarded?: Forwarded
+  /** The server answered from its own cache of what its forwarder told it earlier (nothing sent upstream). */
+  fromServerCache?: { forwarderIp: string }
+  /** The server doesn't hold the name and has no forwarder (REFUSED). */
+  noForwarder?: boolean
+}
+
+/** A DNS server asking its forwarder about a name it doesn't hold. */
+export interface Forwarded {
+  /** The name it asked about (the name asked, or where one of its CNAMEs points). */
+  name: string
+  qtype: DnsRecordType
+  forwarderIp: string
+  /** The forwarder answered (it may have asked its own forwarder in turn). */
+  query?: DnsQuery
+  /** The forwarder never answered: the query went this far. The server answered SERVFAIL. */
+  timeout?: DnsTimeout
+  /** Why the forwarder never answered (an ⓘ line). */
+  explain?: string
 }
 
 /** A DNS server that never answered: how far the queries got, and why. */
@@ -77,10 +104,11 @@ export interface ResolveError {
   name: string
   /**
    * nxdomain: no such name · timeout: the DNS server didn't answer · no-dns: no DNS server set ·
-   * servfail: the server couldn't answer (a CNAME loop) · nodata: the name has no A record ·
+   * servfail: the server couldn't answer (a CNAME loop, or its forwarder didn't answer) ·
+   * refused: the server won't look up names it doesn't hold (no forwarder) · nodata: the name has no A record ·
    * no-ipv4: the name only has an IPv6 (AAAA) address
    */
-  error: 'nxdomain' | 'no-dns' | 'no-route' | 'timeout' | 'servfail' | 'nodata' | 'no-ipv4'
+  error: 'nxdomain' | 'no-dns' | 'no-route' | 'timeout' | 'servfail' | 'refused' | 'nodata' | 'no-ipv4'
   dnsServerNode: NetNode | null
   dnsServerIp: string | null
   /** Why the name couldn't be looked up (an ⓘ line). */
@@ -221,6 +249,22 @@ function askDnsServer(ctx: TermContext, qtype: DnsRecordType, serverOverride?: s
   return { ok: true, server, serverIp, path: route.path }
 }
 
+/**
+ * The domains a DNS server is authoritative for: the names of its NS records; with none, the last two
+ * labels of each name it holds (the rule dig +trace uses). It answers every name in them itself.
+ */
+function ownDomains(server: NetNode, ctx: TermContext): string[] {
+  const zone = zoneOf(server, ctx)
+  const ns = zone.filter((r) => r.type === 'NS').map((r) => normName(r.name))
+  if (ns.length) return [...new Set(ns)]
+  return [...new Set(zone.map((r) => normName(r.name).split('.').slice(-2).join('.')).filter(Boolean))]
+}
+
+function inDomains(name: string, domains: string[]): boolean {
+  const n = normName(name)
+  return domains.some((d) => n === d || n.endsWith(`.${d}`))
+}
+
 /** The records a server holds itself (it is authoritative for these). The internet's resolver holds none. */
 function zoneOf(server: NetNode, ctx: TermContext): DnsRecord[] {
   if (server.data.deviceType !== 'dns') return []
@@ -242,12 +286,11 @@ function publicRecords(name: string): AnswerRecord[] {
 }
 
 /**
- * Records a server can look up for names it doesn't hold. A DNS server node knows the well-known
- * internet names; the internet's resolver (8.8.8.8) also finds the records of DNS servers that are
- * on the internet (public addresses), like a recursive resolver would.
+ * Records the internet's resolver (8.8.8.8) can look up: those held by DNS servers on the internet
+ * (public addresses), like a recursive resolver would find them, and the well-known internet names.
  */
 function lookupElsewhere(server: NetNode, ctx: TermContext): (name: string) => AnswerRecord[] {
-  if (server.data.deviceType !== 'cloud') return publicRecords
+  if (server.data.deviceType !== 'cloud') return () => []
   const internetZones = ctx.nodes.filter((n) => n.data.deviceType === 'dns' && n.data.isOn !== false && n.data.ip && !isPrivateIp(n.data.ip))
   return (name) => {
     for (const z of internetZones) {
@@ -258,9 +301,97 @@ function lookupElsewhere(server: NetNode, ctx: TermContext): (name: string) => A
   }
 }
 
-/** What a server answers for `name` and `qtype`. */
+/** What a server answers, and what it did to find out. */
+type ServerResult = { answer: DnsAnswer } & Pick<DnsQuery, 'forwarded' | 'fromServerCache' | 'noForwarder'>
+
+interface AskOptions {
+  /** Fill the servers' caches with what their forwarders answer (a real lookup, not a peek). */
+  commit: boolean
+  /** The DNS servers already waiting on this lookup (a forwarder pointing back at one is a loop). */
+  chain: string[]
+}
+
+/** Only the fields that are set, so results compare and spread cleanly. */
+function defined<T extends object>(o: T): Partial<T> {
+  return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>
+}
+
+/**
+ * What `server` answers for `name` and `qtype`. A DNS server node answers names it holds, and names in
+ * its own domains, itself; any other name it asks its forwarder (or finds in its cache of earlier
+ * answers). The internet's resolver (8.8.8.8) looks names up itself.
+ */
+function resolveAt(server: NetNode, name: string, qtype: DnsRecordType, ctx: TermContext, o: AskOptions): ServerResult {
+  if (server.data.deviceType !== 'dns') return { answer: answerQuery(zoneOf(server, ctx), lookupElsewhere(server, ctx), name, qtype) }
+  const domains = ownDomains(server, ctx)
+  let how: Omit<ServerResult, 'answer'> = {}
+  const answer = answerQuery(zoneOf(server, ctx), () => [], name, qtype, {
+    // The root ('.') is never forwarded: a DNS server knows the root servers from its built-in root hints
+    inZone: (n) => n === '' || inDomains(n, domains),
+    forward: (n) => {
+      const { answer: up, ...rest } = forward(server, n, qtype, ctx, o)
+      how = rest
+      return up
+    },
+  })
+  return { answer, ...defined(how) }
+}
+
+/** `server` asks its forwarder about `name` (or answers from its cache of what the forwarder said before). */
+function forward(server: NetNode, name: string, qtype: DnsRecordType, ctx: TermContext, o: AskOptions): ServerResult {
+  const forwarderIp = (server.data.dnsForwarder ?? '').trim()
+  if (!forwarderIp) return { answer: { status: 'REFUSED', records: [], authoritative: false }, noForwarder: true }
+  const cacheId = serverCacheId(server.id)
+  const hit = cacheGet(cacheId, name, qtype)
+  if (hit) return { answer: hit.answer, fromServerCache: { forwarderIp: hit.serverIp } }
+
+  const servfail: DnsAnswer = { status: 'SERVFAIL', records: [], authoritative: false }
+  // The query leaves the DNS server, from its own address: route it as if the server sent it
+  const sctx: TermContext = { ...ctx, selfId: server.id }
+  const asked = askDnsServer(sctx, qtype, forwarderIp)!
+  const label = server.data.label
+  const gaveUp = `so after ${FORWARD_TIMEOUT_MS / 1000} s ${label} gave up and answered SERVFAIL. Names ${label} holds itself still work.`
+  if (!asked.ok) {
+    const why = asked.timeout.route.explain.replace(/^ⓘ /, '')
+    const noAnswer = /didn't answer, so the name couldn't be turned/.test(why)
+    const explain = `ⓘ ${label} doesn't hold ${normName(name)}, so it asked its forwarder ${forwarderIp} — which didn't answer, ${gaveUp}${why && !noAnswer ? ` ${why}` : ''}`
+    return { answer: servfail, forwarded: { name, qtype, forwarderIp, timeout: asked.timeout, explain } }
+  }
+  if (asked.server.id === server.id || o.chain.includes(asked.server.id)) {
+    // Forwarders that point back at each other: the query goes round, and nobody answers
+    const explain = `ⓘ ${label} doesn't hold ${normName(name)}, so it asked its forwarder ${forwarderIp} — but that forwards back to ${label} (a forwarding loop), so nobody answered, ${gaveUp}`
+    const timeout: DnsTimeout = { qtype, serverIp: forwarderIp, server: asked.server, route: { ok: false, failure: 'no-reply', reach: asked.path, explain } }
+    return { answer: servfail, forwarded: { name, qtype, forwarderIp, timeout, explain } }
+  }
+  const { answer: got, ...how } = resolveAt(asked.server, name, qtype, sctx, { ...o, chain: [...o.chain, server.id] })
+  const query: DnsQuery = { server: asked.server, serverIp: asked.serverIp, path: asked.path, qtype, answer: got, id: newTransactionId(), ...defined(how) }
+  // A forwarder that refuses gives this server nothing to pass on: it fails the query
+  const answer: DnsAnswer = got.status === 'REFUSED' ? servfail : { ...got, authoritative: false }
+  if (o.commit) cachePut(cacheId, name, qtype, answer, forwarderIp)
+  return { answer, forwarded: { name, qtype, forwarderIp, query } }
+}
+
+/** What a server answers for `name` and `qtype` (a peek: no cache is filled). */
 export function serverAnswer(server: NetNode, name: string, qtype: DnsRecordType, ctx: TermContext): DnsAnswer {
-  return answerQuery(zoneOf(server, ctx), lookupElsewhere(server, ctx), name, qtype)
+  return resolveAt(server, name, qtype, ctx, { commit: false, chain: [] }).answer
+}
+
+/**
+ * Why a lookup failed, as an ⓘ line, from what the server did: its forwarder never answered, it has
+ * no forwarder, or a server further up a chain of forwarders failed. null when forwarding wasn't the reason.
+ */
+export function forwardExplain(q: DnsQuery | undefined): string | null {
+  if (!q) return null
+  if (q.noForwarder) return `ⓘ REFUSED: ${q.server.data.label} doesn't hold that name and has no forwarder set, so it won't look it up for you. Set a forwarder on its Configure panel, or add a record for the name.`
+  const f = q.forwarded
+  if (!f) return null
+  if (f.explain) return f.explain
+  const up = f.query
+  if (up && (up.answer.status === 'SERVFAIL' || up.answer.status === 'REFUSED')) {
+    const why = forwardExplain(up)
+    return `ⓘ ${q.server.data.label} asked its forwarder ${f.forwarderIp}, which couldn't answer either (${up.answer.status}), so it answered SERVFAIL.${why ? ` ${why.replace(/^ⓘ /, '')}` : ''}`
+  }
+  return null
 }
 
 /** The result of asking this device's DNS server one question. */
@@ -301,9 +432,9 @@ export function lookupName(name: string, qtype: DnsRecordType, ctx: TermContext,
         : asked.explain
       return { kind: 'timeout', timeout: asked.timeout, explain, ...(failedFirst.length ? { failedFirst } : {}) }
     }
-    const answer = serverAnswer(asked.server, name, qtype, ctx)
+    const { answer, ...how } = resolveAt(asked.server, name, qtype, ctx, { commit: true, chain: [] })
     if (useCache) cachePut(ctx.selfId, name, qtype, answer, asked.serverIp)
-    const query = { server: asked.server, serverIp: asked.serverIp, path: asked.path, qtype, answer, id: newTransactionId() }
+    const query: DnsQuery = { server: asked.server, serverIp: asked.serverIp, path: asked.path, qtype, answer, id: newTransactionId(), ...defined(how) }
     return { kind: 'answer', answer, query, ...(failedFirst.length ? { failedFirst } : {}) }
   }
   throw new Error('unreachable')
@@ -333,8 +464,11 @@ export function resolveTarget(nameOrIp: string, ctx: TermContext): Resolution {
     ? { name, dnsServerNode: query.server, dnsServerIp: query.serverIp, query, failedFirst: looked.kind === 'answer' ? looked.failedFirst : undefined }
     : { name, dnsServerNode: null, dnsServerIp: null, cached: true }
   if (answer.status === 'NXDOMAIN') return { ...asked, error: 'nxdomain' }
+  if (answer.status === 'REFUSED') {
+    return { ...asked, error: 'refused', explain: forwardExplain(query) ?? `ⓘ The DNS server refused to look up ${name} (REFUSED).` }
+  }
   if (answer.status === 'SERVFAIL') {
-    return { ...asked, error: 'servfail', explain: `ⓘ The DNS server couldn't answer for ${name} (SERVFAIL): its CNAME records go round in a loop, or the chain is too long.` }
+    return { ...asked, error: 'servfail', explain: forwardExplain(query) ?? `ⓘ The DNS server couldn't answer for ${name} (SERVFAIL): its CNAME records go round in a loop, or the chain is too long.` }
   }
   const ip = addressOf(answer)
   if (!ip) {
