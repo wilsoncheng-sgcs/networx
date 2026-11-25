@@ -28,6 +28,7 @@ Networx lets you build virtual networks by dragging hardware components onto a c
 | Scenario | Covers |
 |---|---|
 | Star Topology (LAN) | Switch MAC tables, LAN addressing, ping |
+| Subnetting (/29) | Two /29 subnets on one switch: same subnet reaches, other subnet needs a router |
 | Home Network | NAT, router, WAP, wired + wireless clients |
 | School Network | Firewall rules, network segmentation, servers |
 | Client-Server Model | DNS resolution, HTTP, `nslookup`, `curl` |
