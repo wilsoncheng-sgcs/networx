@@ -223,6 +223,39 @@ const starLan: Preset = {
   ],
 }
 
+// ─── 1b. Subnetting: two /29 subnets on one switch ──────────────────────────
+// 192.168.1.8/29: hosts .9–.14, broadcast .15 · 192.168.1.16/29: hosts .17–.22, broadcast .23.
+// The default gateways (.9 and .17) don't exist: there is no router, so the subnets can't reach each other.
+
+const subnetting: Preset = {
+  id: 'subnetting',
+  name: 'Subnetting (/29)',
+  description: 'Four PCs on one switch, split into two /29 subnets: 192.168.1.8/29 (PC 1, PC 2) and 192.168.1.16/29 (PC 3, PC 4). Same subnet: ping works. Other subnet: it needs a router, and there isn\'t one.',
+  nodes: [
+    node('sw1',  'switch', 'Switch',  '',              { x: 320, y: 240 },
+      { mac: 'aa:bb:cc:dd:01:01', notes: 'One switch, two subnets. Run some pings, then open the MAC Table.' }),
+    node('pc1',  'pc',     'PC 1',    '192.168.1.10',  { x: 120, y: 80  },
+      { subnet: '255.255.255.248', gateway: '192.168.1.9', dnsServer: '',
+        notes: 'Subnet 192.168.1.8/29 (hosts .9–.14, broadcast .15). Try: ping 192.168.1.11 (same subnet), then ping 192.168.1.18 (another subnet).' }),
+    node('pc2',  'pc',     'PC 2',    '192.168.1.11',  { x: 520, y: 80  },
+      { subnet: '255.255.255.248', gateway: '192.168.1.9', dnsServer: '',
+        notes: 'Subnet 192.168.1.8/29 (hosts .9–.14, broadcast .15).' }),
+    node('pc3',  'pc',     'PC 3',    '192.168.1.18',  { x: 120, y: 380 },
+      { subnet: '255.255.255.248', gateway: '192.168.1.17', dnsServer: '',
+        notes: 'Subnet 192.168.1.16/29 (hosts .17–.22, broadcast .23). Try: ping 192.168.1.19, then ping 192.168.1.10.' }),
+    node('pc4',  'pc',     'PC 4',    '192.168.1.19',  { x: 520, y: 380 },
+      { subnet: '255.255.255.248', gateway: '192.168.1.17', dnsServer: '',
+        notes: 'Subnet 192.168.1.16/29 (hosts .17–.22, broadcast .23).' }),
+  ],
+  edges: [
+    edge('e1', 'sw1', 'pc1'),
+    edge('e2', 'sw1', 'pc2'),
+    edge('e3', 'sw1', 'pc3'),
+    edge('e4', 'sw1', 'pc4'),
+  ],
+}
+subnetting.edges = sideHandles(subnetting.nodes, subnetting.edges)
+
 // ─── 2. Home Network ─────────────────────────────────────────────────────────
 
 const homeNetwork: Preset = {
@@ -398,6 +431,7 @@ const meshNetwork: Preset = {
 export const PRESETS: Preset[] = [
   careConnect,
   starLan,
+  subnetting,
   homeNetwork,
   schoolNetwork,
   clientServer,
