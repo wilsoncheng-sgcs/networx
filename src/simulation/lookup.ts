@@ -4,6 +4,7 @@ import { FORWARD_TIMEOUT_MS, type DnsQuery, type DnsTimeout } from './resolve'
 import { dnsSteps, newConversation, runConversations, type Leg } from './exchange'
 import { playUnreachable } from './unreachable'
 import { scaledHop } from './packets'
+import { holdUntilArrival, serverCacheId } from './dnsCache'
 
 type LookupResult = { name: string; query?: DnsQuery; timeout?: DnsTimeout; failedFirst?: DnsTimeout[] }
 
@@ -14,20 +15,32 @@ export function playFailedServers(r: LookupResult, ctx: TermContext, startMs = 0
   return t
 }
 
+/** A leg that sends nothing: the answer cached under `cacheId` shows in the side panel when its packet arrives. */
+function arrivalLeg(cacheId: string, name: string, q: DnsQuery, ctx: TermContext): Leg {
+  const release = holdUntilArrival(cacheId, name, q.qtype)
+  return { play: (t: number) => {
+    if (ctx.schedule) ctx.schedule(t, release)
+    else release()
+    return { lines: [], endMs: t }
+  } }
+}
+
 /**
  * The legs one DNS query puts on the wire, sent by `clientId`: the query, then — when the server doesn't
  * hold the name — its own query to its forwarder and the reply (or, when the forwarder never answers,
- * one query and the wait), then the answer, which prints `lines`.
+ * one query and the wait), then the answer, which prints `lines`. The answer is cached under `cacheId`
+ * (the device's own cache, or a DNS server's cache of what its forwarder told it).
  */
-function queryLegs(q: DnsQuery, name: string, clientId: string, ctx: TermContext, lines?: TerminalLine[]): Leg[] {
+function queryLegs(q: DnsQuery, name: string, clientId: string, cacheId: string, ctx: TermContext, lines?: TerminalLine[]): Leg[] {
   const steps = dnsSteps(q.id, name, q.qtype, q.answer)
   if (lines) steps[1]!.lines = lines
   const conv = newConversation(clientId, q.server.id, q.serverIp, 53, steps)
+  const arrived = arrivalLeg(cacheId, name, q, ctx)
   const f = q.forwarded
-  if (!f) return [{ conv, path: q.path }]
+  if (!f) return [{ conv, path: q.path }, arrived]
   const fromServer: TermContext = { ...ctx, selfId: q.server.id }
   const upstream: Leg[] = f.query
-    ? queryLegs(f.query, f.name, q.server.id, ctx)
+    ? queryLegs(f.query, f.name, q.server.id, serverCacheId(q.server.id), ctx)
     : f.timeout
       ? [{ play: (t: number) => {
           // The server waits for its forwarder even when its query can't leave (no connection at all)
@@ -35,12 +48,12 @@ function queryLegs(q: DnsQuery, name: string, clientId: string, ctx: TermContext
           return { ...p, endMs: Math.max(p.endMs, t + scaledHop(FORWARD_TIMEOUT_MS)) }
         } }]
       : []
-  return [{ conv, path: q.path, steps: [0, 1] }, ...upstream, { conv, path: q.path, steps: [1, 2] }]
+  return [{ conv, path: q.path, steps: [0, 1] }, ...upstream, { conv, path: q.path, steps: [1, 2] }, arrived]
 }
 
 /** The DNS legs for a resolution — played whenever a DNS server answered, even for NXDOMAIN. Empty when nothing was sent. */
 export function dnsLegs(r: { name: string; query?: DnsQuery }, ctx: TermContext, lines?: TerminalLine[]): Leg[] {
-  return r.query ? queryLegs(r.query, r.name, ctx.selfId, ctx, lines) : []
+  return r.query ? queryLegs(r.query, r.name, ctx.selfId, ctx.selfId, ctx, lines) : []
 }
 
 /** The first leg waits `waitMs` (for DNS servers that never answered). */

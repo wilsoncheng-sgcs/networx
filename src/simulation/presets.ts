@@ -379,6 +379,71 @@ const clientServer: Preset = {
   ],
 }
 
+// ─── 4b. Upstream DNS: a local DNS server forwards to the school.local DNS server ─
+// The Local DNS Server holds no records, so it asks its forwarder (202.93.169.10), which holds school.local,
+// and caches the answer for its TTL. The web server sits behind Router 105; the ISP routes 203.93.169.0/24 to it.
+
+const upstreamDns: Preset = {
+  id: 'upstream-dns',
+  name: 'Upstream DNS',
+  description: 'A local DNS server with no records of its own forwards to the school.local DNS server (202.93.169.10), then caches the answer. On the Desktop PC run nslookup www.school.local twice, and watch the Local DNS Server\'s DNS Cache tab.',
+  nodes: [
+    node('cloud1', 'cloud', 'Internet', '0.0.0.0', { x: 320, y: 330 },
+      { mac: 'aa:bb:cc:dd:d1:01', notes: 'Represents your ISP and the public internet.',
+        ispRoutes: [{ id: 'isp1', destination: '203.93.169.0', subnet: '255.255.255.0', nextHop: '82.1.2.10' }] }),
+    node('gw1', 'gateway', 'Home Gateway', '192.168.1.1', { x: 540, y: 330 },
+      { mac: 'aa:bb:cc:dd:a1:01', wanIp: '82.1.2.3',
+        routingTable: [
+          { destination: '0.0.0.0',     subnet: '0.0.0.0',       gateway: '0.0.0.0', iface: 'eth0', metric: 0 },
+          { destination: '192.168.1.0', subnet: '255.255.255.0', gateway: '0.0.0.0', iface: 'eth1', metric: 0 },
+        ],
+        dhcpEnabled: true, dhcpPool: '100-200', dhcpDns: '192.168.1.100',
+        ssid: 'HomeNet-5G', wpaKey: 'supersecret', band: '5GHz',
+        rules: [
+          { id: 'r1', direction: 'in', protocol: 'TCP', srcIp: '*', dstIp: '*', port: '80', action: 'allow' },
+          { id: 'r2', direction: 'in', protocol: 'ANY', srcIp: '*', dstIp: '*', port: '*',  action: 'deny'  },
+        ],
+        notes: 'DHCP gives clients 192.168.1.100 (the Local DNS Server) as their DNS server.' }),
+    node('pc1', 'pc', 'Desktop PC', '192.168.1.101', { x: 800, y: 200 },
+      { mac: 'aa:bb:cc:dd:c1:01', ipMode: 'dhcp', dnsServer: '192.168.1.100',
+        notes: 'DNS server 192.168.1.100. Try: nslookup www.school.local (the Local DNS Server asks 202.93.169.10), then run it again (answered from its cache), then curl http://www.school.local.' }),
+    node('pc2', 'pc', 'Work PC', '192.168.1.12', { x: 800, y: 350 },
+      { mac: 'aa:bb:cc:dd:c2:01', dnsServer: '192.168.1.100' }),
+    node('laptop1', 'laptop', 'Laptop', '192.168.1.20', { x: 800, y: 500 },
+      { mac: 'aa:bb:cc:dd:b1:01', dnsServer: '8.8.8.8', notes: 'Connected wirelessly to HomeNet-5G. Uses 8.8.8.8, not the Local DNS Server.' }),
+    node('dns1', 'dns', 'Local DNS Server', '192.168.1.100', { x: 570, y: 30 },
+      { mac: 'aa:bb:cc:dd:d2:01', ipMode: 'dhcp', dnsServer: '8.8.8.8', dnsForwarder: '202.93.169.10', dnsRecords: [],
+        notes: 'Holds no records. Names it doesn\'t hold go to its forwarder, 202.93.169.10 (Basic tab), and the answer is cached for its TTL (DNS Cache tab).' }),
+    node('dns2', 'dns', 'school.local DNS Server', '202.93.169.10', { x: 270, y: 60 },
+      { mac: 'aa:bb:cc:dd:d3:01', gateway: '202.93.169.1', dnsServer: '8.8.8.8',
+        dnsRecords: [
+          { id: 'sl1', name: 'www.school.local',      type: 'A',  value: '203.93.169.26',    ttl: 3600 },
+          { id: 'sl2', name: 'intranet.school.local', type: 'A',  value: '192.168.1.81',     ttl: 3600 },
+          { id: 'sl3', name: 'ns1.school.local',      type: 'A',  value: '202.93.169.10',    ttl: 3600 },
+          { id: 'sl4', name: 'school.local',          type: 'NS', value: 'ns1.school.local', ttl: 3600 },
+        ],
+        notes: 'Holds school.local. Switch it off and the Local DNS Server answers SERVFAIL for names it hasn\'t cached.' }),
+    node('web1', 'web', 'Web Server', '203.93.169.26', { x: 40, y: 20 },
+      { mac: 'aa:bb:cc:dd:e1:01', gateway: '203.93.169.25', dnsServer: '202.93.169.10', services: { http: true }, certificate: 'valid', redirectHttp: false,
+        pageContent: '<!DOCTYPE html>\n<html>\n<head>\n  <title>My Web Server</title>\n</head>\n<body>\n  <h1>Welcome to My Web Server</h1>\n  <p>This page is being served from the web server node.</p>\n  <p>Edit this content in the Configure panel &rarr; Page tab.</p>\n</body>\n</html>' }),
+    node('router1', 'router', 'Router 105', '203.93.169.25', { x: 130, y: 340 },
+      { mac: 'aa:bb:cc:dd:f1:01', wanIp: '82.1.2.10',
+        routingTable: [{ destination: '0.0.0.0', subnet: '0.0.0.0', gateway: '0.0.0.0', iface: 'eth0', metric: 0 }],
+        notes: 'The web server\'s gateway (203.93.169.25). The ISP sends 203.93.169.0/24 to its WAN address, 82.1.2.10.' }),
+  ],
+  edges: [
+    edge('e1', 'cloud1', 'gw1'),
+    edge('e2', 'gw1', 'pc1'),
+    edge('e3', 'gw1', 'pc2'),
+    edge('e4', 'gw1', 'laptop1', true),
+    edge('e5', 'gw1', 'dns1'),
+    edge('e6', 'dns2', 'cloud1'),
+    edge('e7', 'router1', 'web1'),
+    edge('e8', 'router1', 'cloud1'),
+  ],
+}
+upstreamDns.edges = sideHandles(upstreamDns.nodes, upstreamDns.edges)
+
 // ─── 5. Mesh / Internet backbone ─────────────────────────────────────────────
 
 const meshNetwork: Preset = {
@@ -435,5 +500,6 @@ export const PRESETS: Preset[] = [
   homeNetwork,
   schoolNetwork,
   clientServer,
+  upstreamDns,
   meshNetwork,
 ]
