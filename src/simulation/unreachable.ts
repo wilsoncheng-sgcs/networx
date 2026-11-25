@@ -32,11 +32,12 @@ export function playUnreachable(
   ctx: TermContext,
   lines: TerminalLine[],
   startMs = 0,
-): { lines: TerminalLine[]; endMs: number } {
+): { lines: TerminalLine[]; endMs: number; tryTimes: number[] } {
   const src = nodeById(ctx.selfId, ctx.nodes)
   const at = (t: number) => lines.map((l) => ({ ...l, delayMs: t + (l.delayMs ?? 0) }))
-  if (!src) return { lines: at(startMs), endMs: startMs }
-  const convId = `drop-${nextBatchId()}`
+  if (!src) return { lines: at(startMs), endMs: startMs, tryTimes: [] }
+  // Ping's echo requests are Steps (step mode pauses before each), as they are when ping succeeds
+  const convId = attempt.kind === 'icmp' ? `conv-icmp-${nextBatchId()}` : `drop-${nextBatchId()}`
   const packets: PacketAnim[] = []
   const captures: PendingCapture[] = []
 
@@ -57,7 +58,7 @@ export function playUnreachable(
     const end = startMs + 3 * gap
     ctx.dispatchPackets?.(packets)
     ctx.dispatchCaptures?.(captures)
-    return { lines: at(end), endMs: end }
+    return { lines: at(end), endMs: end, tryTimes: [] }
   }
 
   const travels = travelsPartWay(route.failure)
@@ -73,7 +74,9 @@ export function playUnreachable(
     // A resolver waits about 5 s for each answer; TCP and ping retry as soon as the last one has gone
     const gap = attempt.kind === 'dns' ? Math.max(scaledHop(DNS_RETRY_MS), legMs + hop) : legMs + Math.max(hop, 1)
     let t = startMs
+    const tryTimes: number[] = []
     for (let i = 0; i < tries; i++) {
+      tryTimes.push(t)
       const base = {
         delayMs: t, conversationId: convId, stepIndex: i, route: route.reach,
         srcIp: src.data.ip, dstIp, ...macs, encrypted: false,
@@ -103,9 +106,9 @@ export function playUnreachable(
     const end = attempt.kind === 'dns' ? t : t + legMs
     ctx.dispatchPackets?.(packets)
     ctx.dispatchCaptures?.(captures)
-    return { lines: at(end), endMs: end }
+    return { lines: at(end), endMs: end, tryTimes }
   }
 
   // Nothing leaves the device
-  return { lines: at(startMs), endMs: startMs }
+  return { lines: at(startMs), endMs: startMs, tryTimes: [] }
 }
