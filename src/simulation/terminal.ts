@@ -1,7 +1,7 @@
 import type { TerminalLine, PacketAnim, PendingCapture, NetNode } from '../types'
 import { nodeById, simulatePingRtt, subnetToCidr, sameSubnet, networkRange } from './network'
 import { type TermContext, type Lines, out, err, info, self, delayLines } from './context'
-import { HOP_MS, scaledHop, leg, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
+import { HOP_MS, scaledHop, leg, makePackets, makePacketsWithArp, finishMs, startAfter, firstHopMacs } from './packets'
 import { resolveTarget, isResolveError, isIp, dnsServersOf, defaultDnsServer, routeTo, nodeForIp, type Resolution } from './resolve'
 import { playLookup } from './lookup'
 import { errnoText, travelsPartWay, findSegmentPath, isRoutingHop, ttlAfter, INTERNET_HOPS, type Route } from './routing'
@@ -68,48 +68,58 @@ function cmdPing(args: string[], ctx: TermContext): Lines {
     return [...lines, out(header, afterDns), err('Request timeout for icmp_seq 0', afterDns)]
   }
 
-  const icmpPackets = startAfter(makePacketsWithArp(src, dst, path, ctx, 'ICMP', 'ICMP', true), afterDns)
-  ctx.dispatchPackets?.(icmpPackets)
-
+  // ARP (if needed) and the first echo; then the other three, each once the previous reply is back
+  const first = startAfter(makePacketsWithArp(src, dst, path, ctx, 'ICMP', 'ICMP', true), afterDns)
   const hops = path.length - 1
+  const hop = scaledHop(HOP_MS)
+  const roundTrip = 2 * hops * hop
+  const echoStart = finishMs(first) - roundTrip
+  const interval = roundTrip + hop
+  const echoAt = (i: number) => echoStart + i * interval
+  ctx.dispatchPackets?.([
+    ...first,
+    ...[1, 2, 3].flatMap((i) => startAfter(makePackets(path, ctx.edges, 'ICMP', 'ICMP', true), echoAt(i))),
+  ])
+
   const internet = dst.data.deviceType === 'cloud'
   // The reply starts at TTL 64 and loses one at every router on the way back (switches don't count)
   const replyTtl = ttlAfter([...path].reverse(), ctx.nodes)
 
-  // Capture: four echo request/reply pairs; the first is the one animated
-  const roundTrip = 2 * hops * scaledHop(HOP_MS)
-  const echoStart = finishMs(icmpPackets) - roundTrip
+  // Capture: four echo request/reply pairs, each record due when its packet leaves. A conv- id makes
+  // each one a Step, so step mode pauses before every request and every reply.
   const out1 = firstHopMacs(path, ctx.nodes)
   const back1 = firstHopMacs([...path].reverse(), ctx.nodes)
-  const convId = `icmp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+  const convId = `conv-icmp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
   const icmpBase = { conversationId: convId, transport: 'ICMP' as const, app: 'ICMP' as const, encrypted: false, length: 84 }
   const captures: PendingCapture[] = []
   for (let i = 0; i < 4; i++) {
-    const t = echoStart + i * Math.max(roundTrip, 1)
     captures.push(
-      { ...icmpBase, stepIndex: 2 * i, delayMs: t, srcIp: src.data.ip, dstIp: r.ip, ...out1, route: path,
+      { ...icmpBase, stepIndex: 2 * i, delayMs: echoAt(i), srcIp: src.data.ip, dstIp: r.ip, ...out1, route: path,
         info: `Echo (ping) request  id=0x0001, seq=${i}, ttl=64` },
-      { ...icmpBase, stepIndex: 2 * i + 1, delayMs: t + roundTrip / 2, srcIp: r.ip, dstIp: src.data.ip, ...back1, route: [...path].reverse(),
+      { ...icmpBase, stepIndex: 2 * i + 1, delayMs: echoAt(i) + roundTrip / 2, srcIp: r.ip, dstIp: src.data.ip, ...back1, route: [...path].reverse(),
         info: `Echo (ping) reply    id=0x0001, seq=${i}, ttl=${replyTtl}` },
     )
   }
   ctx.dispatchCaptures?.(captures)
-  const body: Lines = [out(header)]
+
+  // Each reply line prints when that reply arrives; the statistics after the last one
+  const body: Lines = [out(header, afterDns)]
   const rtts: number[] = []
   for (let i = 0; i < 4; i++) {
     const rtt = internet ? 20 + hops * 8 + Math.floor(Math.random() * 15) : simulatePingRtt(hops)
     rtts.push(rtt)
-    body.push(out(`64 bytes from ${r.ip}: icmp_seq=${i} ttl=${replyTtl} time=${rtt} ms`))
+    body.push(out(`64 bytes from ${r.ip}: icmp_seq=${i} ttl=${replyTtl} time=${rtt} ms`, echoAt(i) + roundTrip))
   }
   const min = Math.min(...rtts), max = Math.max(...rtts)
   const avg = Math.round(rtts.reduce((a, b) => a + b, 0) / rtts.length)
+  const done = echoAt(3) + roundTrip
   body.push(
-    out(''),
-    out(`--- ${target} ping statistics ---`),
-    out('4 packets transmitted, 4 packets received, 0.0% packet loss'),
-    out(`round-trip min/avg/max = ${min}/${avg}/${max} ms`),
+    out('', done),
+    out(`--- ${target} ping statistics ---`, done),
+    out('4 packets transmitted, 4 packets received, 0.0% packet loss', done),
+    out(`round-trip min/avg/max = ${min}/${avg}/${max} ms`, done),
   )
-  return [...lines, ...delayLines(body, afterDns)]
+  return [...lines, ...body]
 }
 
 /** What ping prints when the address rules stop it, with the packets that do go out. */
@@ -130,9 +140,19 @@ function pingFailure(route: Extract<Route, { ok: false }>, target: string, ip: s
     case 'not-on-network':
     case 'no-reply':
     case 'blocked':
-    case 'no-route':
-      body = [out(header), ...[0, 1, 2, 3].map((i) => out(`Request timeout for icmp_seq ${i}`)), ...stats(4), ...explain]
-      break
+    case 'no-route': {
+      // Four echo requests that get no reply: each timeout prints as the next request goes out
+      const played = playUnreachable(route, { kind: 'icmp' }, ip, ctx, [], startMs)
+      if (played.tryTimes.length) {
+        const t = played.tryTimes
+        return [
+          out(header, startMs),
+          ...[0, 1, 2, 3].map((i) => out(`Request timeout for icmp_seq ${i}`, t[i + 1] ?? played.endMs)),
+          ...delayLines([...stats(4), ...explain], played.endMs),
+        ]
+      }
+      return delayLines([out(header), ...[0, 1, 2, 3].map((i) => out(`Request timeout for icmp_seq ${i}`)), ...stats(4), ...explain], played.endMs)
+    }
     default:
       body = [err('ping: sendmsg: No route to host'), ...explain]
   }
