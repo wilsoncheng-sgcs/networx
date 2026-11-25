@@ -15,10 +15,20 @@ interface Entry {
   serverIp: string
   storedAt: number   // ms, simulation clock
   expiresAt: number
+  /** Still on its way: the answer's packet hasn't reached the device yet (the side panel doesn't list it). */
+  arriving?: boolean
 }
 
 const caches = new Map<string, Map<string, Entry>>()
 let nowMs: () => number = () => clock.now()
+
+const listeners = new Set<() => void>()
+/** The side panel: tell me when any cache changes. Returns an unsubscribe function. */
+export function subscribeDnsCache(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => { listeners.delete(listener) }
+}
+const changed = () => listeners.forEach((l) => l())
 
 /** Tests: drive the cache from a fake clock. */
 export function setDnsCacheClock(fn: () => number): void {
@@ -41,6 +51,23 @@ export function cachePut(nodeId: string, name: string, qtype: DnsRecordType, ans
   const cache = caches.get(nodeId) ?? new Map<string, Entry>()
   cache.set(key(name, qtype), { name: normName(name), qtype, answer, serverIp, storedAt: now, expiresAt: now + seconds * 1000 })
   caches.set(nodeId, cache)
+  changed()
+}
+
+/**
+ * The answer just cached for this question is still on its way: keep it out of the side panel until
+ * the returned function is called (when its packet arrives). Only an entry stored at this moment is
+ * held, so an older answer already in the cache (dig doesn't use the cache) stays listed.
+ */
+export function holdUntilArrival(nodeId: string, name: string, qtype: DnsRecordType): () => void {
+  const entry = caches.get(nodeId)?.get(key(name, qtype))
+  if (!entry || entry.storedAt !== nowMs()) return () => {}
+  entry.arriving = true
+  return () => {
+    if (!entry.arriving) return
+    entry.arriving = false
+    changed()
+  }
 }
 
 export interface CachedAnswer {
@@ -88,8 +115,16 @@ export function cacheEntries(nodeId: string): Array<CachedAnswer & { name: strin
     .map((e) => ({ ...live(e, now), name: e.name, qtype: e.qtype }))
 }
 
+/** What the side panel lists: every unexpired answer that has arrived, soonest to expire first. */
+export function cacheArrived(nodeId: string): ReturnType<typeof cacheEntries> {
+  const cache = caches.get(nodeId)
+  const arrived = new Set([...(cache?.values() ?? [])].filter((e) => !e.arriving).map((e) => key(e.name, e.qtype)))
+  return cacheEntries(nodeId).filter((e) => arrived.has(key(e.name, e.qtype)))
+}
+
 export function flushDnsCache(nodeId: string): void {
   caches.delete(nodeId)
+  changed()
 }
 
 /**
@@ -103,4 +138,5 @@ export function serverCacheId(nodeId: string): string {
 /** A new network was loaded: no device has cached anything yet. */
 export function clearAllDnsCaches(): void {
   caches.clear()
+  changed()
 }

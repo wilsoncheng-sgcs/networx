@@ -32,6 +32,7 @@ Networx lets you build virtual networks by dragging hardware components onto a c
 | Home Network | NAT, router, WAP, wired + wireless clients |
 | School Network | Firewall rules, network segmentation, servers |
 | Client-Server Model | DNS resolution, HTTP, `nslookup`, `curl` |
+| Upstream DNS | A local DNS server with no records forwards to the school.local DNS server and caches the answer |
 | Mesh / WAN Topology | Redundant paths, inter-site routing, internet backbone |
 
 ## Curriculum links
@@ -87,6 +88,9 @@ DNS, FTP, SFTP, SSL, TLS, SMTP, POP3, IMAP”* (SE-12-03). It adds:
   answer for its TTL, so the next lookup has no upstream leg. If the forwarder can't be reached (no connection, ISP
   route, firewall), the server answers **SERVFAIL** after 3 s with an ⓘ saying why, while its own names still work;
   with no forwarder it answers **REFUSED**
+- **DNS Cache tab** in Configure on every host: what the device has cached, with each TTL counting down and the
+  server it came from, plus a Flush button (the same as `dnscache` / `flushdns`). On a DNS server it also lists the
+  answers it got from its forwarder. An answer appears when its packet arrives, not before
 - **DHCP** hands out the router's own address as the default gateway and its own subnet mask; hosts choose
   **Manual** or **Automatic (DHCP)** addressing in Configure
 - **ISP routing table** on the Internet node: a public network behind a router is reachable from the internet only

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { X, Plus, Trash2, Power, RotateCcw, ChevronUp, ChevronDown, Pencil } from 'lucide-react'
 import { useNetworkStore } from '../store'
 import type { FirewallRule, DnsRecord, DnsRecordType, StoredFile, Mailbox, NetNode, CertificateState } from '../types'
@@ -9,6 +9,7 @@ import { RECORD_TYPES, RECORD_HELP, DEFAULT_TTL, validateRecord, rdata } from '.
 import { dhcpRequest } from '../simulation/terminal'
 import { announcement, parsePrefix, validateIspRoute, routePrefix, nextHopLabel, lanNetwork } from '../simulation/isp'
 import * as clock from '../simulation/clock'
+import { cacheArrived, flushDnsCache, serverCacheId, subscribeDnsCache } from '../simulation/dnsCache'
 
 
 /** A copy of `list` with the item at `from` moved to `to`. */
@@ -264,7 +265,7 @@ function IpAssignment({ node }: { node: NetNode }) {
 export default function ConfigPanel({ nodeId, onClose }: Props) {
   const { nodes, updateNodeData, addRoute, removeRoute, addRule, removeRule } = useNetworkStore()
   const node = nodes.find((n) => n.id === nodeId)
-  const [tab, setTab] = useState<'basic' | 'advanced' | 'isp' | 'security' | 'wireless' | 'page' | 'records' | 'files' | 'mailboxes' | 'services'>('basic')
+  const [tab, setTab] = useState<'basic' | 'advanced' | 'isp' | 'security' | 'wireless' | 'page' | 'records' | 'files' | 'mailboxes' | 'services' | 'cache'>('basic')
 
   if (!node) return null
 
@@ -315,6 +316,7 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
     ...(isFile ? [{ id: 'files',   label: 'Files' }]      : []),
     ...(isMail ? [{ id: 'mailboxes', label: 'Mailboxes' }] : []),
     ...(hasServices ? [{ id: 'services', label: 'Services' }] : []),
+    ...(isHost ? [{ id: 'cache', label: 'DNS Cache' }] : []),
   ] as { id: string; label: string }[]
 
   return (
@@ -593,6 +595,8 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
               : <RecordsTab records={data.dnsRecords ?? []} onChange={(dnsRecords) => upd({ dnsRecords })} />}
           </>
         )}
+
+        {tab === 'cache' && isHost && <DnsCacheTab node={node} />}
 
         {tab === 'files' && isFile && (
           <FilesTab
@@ -1193,6 +1197,98 @@ function SecondaryToggle({ node, nodes, onChange }: { node: NetNode; nodes: NetN
 }
 
 /** The records, read-only (a secondary's copy). */
+/** Re-render when a DNS cache changes, and every second so the TTLs count down (they stop while step mode pauses). */
+function useDnsCacheTick(): void {
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const bump = () => setTick((n) => n + 1)
+    const off = subscribeDnsCache(bump)
+    const timer = setInterval(bump, 1000)
+    return () => { off(); clearInterval(timer) }
+  }, [])
+}
+
+function CacheTable({ cacheId, testId, empty }: { cacheId: string; testId: string; empty: string }) {
+  const entries = cacheArrived(cacheId)
+  if (!entries.length) return <p data-testid={`${testId}-empty`} className="text-xs text-gray-400 text-center py-3">{empty}</p>
+  return (
+    <div data-testid={testId} className="border border-gray-100 rounded-lg overflow-hidden">
+      <table className="w-full text-xs">
+        <thead className="bg-gray-50 text-gray-500">
+          <tr>
+            <th className="text-left font-semibold px-2 py-1">Name</th>
+            <th className="text-left font-semibold px-1 py-1">Type</th>
+            <th className="text-left font-semibold px-1 py-1">Answer</th>
+            <th className="text-right font-semibold px-2 py-1 whitespace-nowrap" title="Seconds until the answer expires">TTL left</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((e) => (
+            <tr key={`${e.name}|${e.qtype}`} data-testid="dns-cache-row" className="border-t border-gray-100 align-top">
+              <td className="px-2 py-1 font-mono">
+                <DottedName name={e.name} />
+                <div className="text-gray-400 font-sans">from {e.serverIp}</div>
+              </td>
+              <td className="px-1 py-1 font-mono font-semibold text-gray-600">{e.qtype}</td>
+              <td className="px-1 py-1 font-mono [overflow-wrap:anywhere]">
+                {e.answer.status !== 'NOERROR'
+                  ? <span className="text-red-600">{e.answer.status === 'NXDOMAIN' ? 'no such name' : e.answer.status}</span>
+                  : e.answer.records.length
+                    ? e.answer.records.map((r, i) => <div key={i}><DottedName name={rdata(r)} />{r.type !== e.qtype && <span className="text-gray-400"> ({r.type})</span>}</div>)
+                    : <span className="text-gray-400 font-sans">no record of this type</span>}
+              </td>
+              <td className="px-2 py-1 font-mono text-right whitespace-nowrap">{e.remaining} s</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/**
+ * What this device has cached from DNS (the same as dnscache in its terminal). A DNS server also lists the
+ * answers it got from its forwarder, which it uses to answer other devices.
+ */
+function DnsCacheTab({ node }: { node: NetNode }) {
+  useDnsCacheTick()
+  const isServer = node.data.deviceType === 'dns'
+  const flush = () => {
+    flushDnsCache(node.id)
+    if (isServer) flushDnsCache(serverCacheId(node.id))
+  }
+  return (
+    <div className="space-y-4">
+      {isServer && (
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold text-gray-700">Answers from its forwarder</h3>
+          <p className="text-xs text-gray-400">
+            Names this server doesn't hold, asked of its forwarder{node.data.dnsForwarder ? <> (<span className="font-mono">{node.data.dnsForwarder}</span>)</> : ''}.
+            Until the TTL runs out, it answers other devices from here without asking again.
+          </p>
+          <CacheTable cacheId={serverCacheId(node.id)} testId="dns-server-cache" empty="Nothing cached yet. Look up a name this server doesn't hold from a device that uses it." />
+        </div>
+      )}
+      <div className="space-y-2">
+        <h3 className="text-sm font-semibold text-gray-700">{isServer ? 'Its own lookups' : 'DNS cache'}</h3>
+        <p className="text-xs text-gray-400">
+          {isServer
+            ? "Names looked up by commands run in this server's terminal."
+            : 'Names this device has looked up. It uses an answer until the TTL runs out, then asks its DNS server again. (nslookup and dig ask the DNS server directly, so they don\'t add to it.)'}
+        </p>
+        <CacheTable cacheId={node.id} testId="dns-cache" empty={`Empty. Try ping or curl with a name in ${node.data.label}'s terminal.`} />
+      </div>
+      <button
+        data-testid="dns-cache-flush"
+        onClick={flush}
+        className="flex items-center gap-1 text-xs bg-blue-50 text-blue-600 hover:bg-blue-100 px-2 py-1 rounded transition-colors"
+      >
+        <Trash2 size={11} /> Flush (same as flushdns)
+      </button>
+    </div>
+  )
+}
+
 function RecordsTable({ records }: { records: DnsRecord[] }) {
   return (
     <div className="border border-gray-100 rounded-lg overflow-hidden">
