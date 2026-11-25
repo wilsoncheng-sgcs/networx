@@ -133,6 +133,7 @@ export interface NodeData extends Record<string, unknown> {
   dhcpDns?: string                                  // routers/gateways: the DNS server DHCP hands to clients
   dnsAlternate?: string                             // hosts: asked when the DNS server doesn't answer (B6)
   dnsPrimary?: string                               // DNS servers: a secondary copies this primary's records (B6)
+  dnsForwarder?: string                             // DNS servers: asked for names the server doesn't hold ('' = none: REFUSED)
 }
 
 export type NetNode = Node<NodeData>

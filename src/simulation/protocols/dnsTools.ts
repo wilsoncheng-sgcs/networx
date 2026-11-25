@@ -1,12 +1,12 @@
 import type { DnsRecordType, TerminalLine } from '../../types'
 import { type TermContext, type Lines, out, err, info, delayLines } from '../context'
-import { lookupName, isIp, resolveTarget, isResolveError, dnsServerIpOf, routeTo, serverAnswer, PUBLIC_IPS, type DnsLookup } from '../resolve'
+import { lookupName, isIp, resolveTarget, isResolveError, dnsServerIpOf, routeTo, serverAnswer, forwardExplain, PUBLIC_IPS, FORWARD_TIMEOUT_MS, type DnsLookup, type DnsQuery } from '../resolve'
 import { playLookup } from '../lookup'
 import { newConversation, runConversations, dnsSteps, type Leg } from '../exchange'
 import { RECORD_TYPES, digLine, fqdn, rdata, messageSize, normName, newTransactionId, type DnsAnswer, type AnswerRecord } from '../dns'
 import type { NetNode } from '../../types'
 import { nodeById } from '../network'
-import { cacheEntries, flushDnsCache } from '../dnsCache'
+import { cacheEntries, flushDnsCache, serverCacheId } from '../dnsCache'
 
 /**
  * dig and nslookup (Phase 4 B3). Both ask this device's DNS server (or the one named with @) and
@@ -31,13 +31,35 @@ function parseType(s: string | undefined): DnsRecordType | null {
   return t && (RECORD_TYPES as string[]).includes(t) ? (t as DnsRecordType) : null
 }
 
+/** How the server found a non-authoritative answer, in one ⓘ line (the "no aa flag" note). */
+function lookedUpNote(query: DnsQuery | undefined): string {
+  if (!query) return 'ⓘ No aa flag: the server looked the answer up elsewhere for you, so it is not authoritative.'
+  const label = query.server.data.label
+  if (query.fromServerCache) {
+    return `ⓘ No aa flag: ${label} doesn't hold this name. It answered from its own cache of what its forwarder (${query.fromServerCache.forwarderIp}) told it earlier, so nothing more was sent upstream.`
+  }
+  if (query.forwarded?.query) {
+    return `ⓘ No aa flag: ${label} doesn't hold this name, so it asked its forwarder (${query.forwarded.forwarderIp}) and passed the answer on. It keeps the answer in its cache until the TTL runs out.`
+  }
+  if (query.server.data.deviceType === 'cloud') return `ⓘ No aa flag: ${query.serverIp} is a public resolver. It looked the answer up for you, so it is not authoritative.`
+  return 'ⓘ No aa flag: the server looked the answer up elsewhere for you, so it is not authoritative.'
+}
+
 /** Plain-language notes after an answer: one per record type, the TTLs, and what the flags mean. */
-export function answerNotes(name: string, qtype: DnsRecordType, answer: DnsAnswer, cached = false): string[] {
+export function answerNotes(name: string, qtype: DnsRecordType, answer: DnsAnswer, cached = false, query?: DnsQuery): string[] {
   const notes: string[] = []
   const fromCache = 'ⓘ Answered from this device\'s cache — nothing was sent. It stays cached until the TTL runs out.'
-  if (answer.status === 'NXDOMAIN') return [`ⓘ NXDOMAIN: no such name — the DNS server has no records for ${normName(name)}.`, ...(cached ? [fromCache] : [])]
-  if (answer.status === 'SERVFAIL') return ["ⓘ SERVFAIL: the server couldn't answer — the CNAME records go round in a loop, or the chain is too long."]
-  if (!answer.records.length) return [`ⓘ NOERROR but no answer: ${normName(name)} exists, but has no ${qtype} record.`, ...(cached ? [fromCache] : [])]
+  const n = normName(name)
+  const forwarded = query?.forwarded?.query || query?.fromServerCache
+  if (answer.status === 'NXDOMAIN') {
+    const where = forwarded
+      ? `${query!.server.data.label} doesn't hold ${n}, and its forwarder found no records for it either.`
+      : `the DNS server has no records for ${n}.`
+    return [`ⓘ NXDOMAIN: no such name — ${where}`, ...(cached ? [fromCache] : [])]
+  }
+  if (answer.status === 'REFUSED') return [forwardExplain(query) ?? 'ⓘ REFUSED: the server won\'t look up names it doesn\'t hold.']
+  if (answer.status === 'SERVFAIL') return [forwardExplain(query) ?? "ⓘ SERVFAIL: the server couldn't answer — the CNAME records go round in a loop, or the chain is too long."]
+  if (!answer.records.length) return [`ⓘ NOERROR but no answer: ${n} exists, but has no ${qtype} record.`, ...(cached ? [fromCache] : [])]
   const first = (t: DnsRecordType) => answer.records.find((r) => r.type === t)
   // In the order the records appear (a CNAME, then what it points to)
   for (const t of [...new Set(answer.records.map((r) => r.type))]) {
@@ -59,7 +81,7 @@ export function answerNotes(name: string, qtype: DnsRecordType, answer: DnsAnswe
     : `ⓘ ${ttls.slice(0, -1).join(', ')} and ${ttls[ttls.length - 1]} are TTLs: how many seconds a resolver may keep this answer in its cache.`)
   notes.push(cached ? fromCache : answer.authoritative
     ? 'ⓘ aa (authoritative answer): this server holds these records itself.'
-    : 'ⓘ No aa flag: this server looked the answer up elsewhere for you, so it is not authoritative.')
+    : lookedUpNote(query))
   return notes
 }
 
@@ -73,6 +95,13 @@ function serverFromArg(arg: string, ctx: TermContext): { ip: string } | { error:
 function queryTimeMs(path: string[], ctx: TermContext): number {
   const crosses = path.some((id) => nodeById(id, ctx.nodes)?.data.deviceType === 'cloud')
   return Math.max(1, (path.length - 1) * 2 + (crosses ? 10 : 0))
+}
+
+/** dig's Query time for a query: there and back, plus the server's own query to its forwarder (or its wait for one). */
+function totalQueryMs(q: DnsQuery, ctx: TermContext): number {
+  const f = q.forwarded
+  const upstream = f?.query ? totalQueryMs(f.query, ctx) : f?.timeout ? FORWARD_TIMEOUT_MS : 0
+  return queryTimeMs(q.path, ctx) + upstream
 }
 
 export function cmdDig(args: string[], ctx: TermContext): Lines {
@@ -126,12 +155,12 @@ function digAnswer(name: string, qtype: DnsRecordType, looked: Extract<DnsLookup
     out(`;${fqdn(name)}\t\tIN\t${qtype}`),
     out(''),
     ...(records.length ? [out(';; ANSWER SECTION:'), ...records.map((r) => out(digLine(r))), out('')] : []),
-    out(`;; Query time: ${cached ? 0 : queryTimeMs(looked.query.path, o.ctx)} msec`),
+    out(`;; Query time: ${cached ? 0 : totalQueryMs(looked.query, o.ctx)} msec`),
     out(`;; SERVER: ${serverIp}#53(${serverIp})`),
     out(`;; WHEN: ${digWhen()}`),
     out(`;; MSG SIZE  rcvd: ${messageSize(name, records)}`),
     out(''),
-    ...answerNotes(name, qtype, answer, cached).map((t) => info(t)),
+    ...answerNotes(name, qtype, answer, cached, cached ? undefined : looked.query).map((t) => info(t)),
   ]
 }
 
@@ -172,12 +201,14 @@ export function cmdNslookup(args: string[], ctx: TermContext): Lines {
   const { answer, query } = looked
   const lines: Lines = [out(`Server:   ${query.serverIp}`), out(`Address:  ${query.serverIp}#53`), out('')]
   if (answer.status === 'NXDOMAIN') lines.push(out(`** server can't find ${domain}: NXDOMAIN`))
-  else if (answer.status === 'SERVFAIL') lines.push(out(`** server can't find ${domain}: SERVFAIL`))
+  else if (answer.status === 'SERVFAIL' || answer.status === 'REFUSED') lines.push(out(`** server can't find ${domain}: ${answer.status}`))
   else if (!answer.records.length) lines.push(out(`*** Can't find ${domain}: No answer`))
   else {
     if (!answer.authoritative) lines.push(out('Non-authoritative answer:'))
     for (const r of answer.records) lines.push(...nslookupLine(r))
   }
+  const why = forwardExplain(query)
+  if (why && answer.status !== 'NOERROR' && answer.status !== 'NXDOMAIN') lines.push(info(why))
   const end = playLookup({ name: domain, query, failedFirst: looked.failedFirst }, ctx).endMs
   return delayLines(lines, end)
 }
@@ -185,29 +216,45 @@ export function cmdNslookup(args: string[], ctx: TermContext): Lines {
 
 // ── The device's DNS cache ──────────────────────────────────────────────────
 
-export function cmdDnsCache(ctx: TermContext): Lines {
-  const me = nodeById(ctx.selfId, ctx.nodes)
-  const entries = cacheEntries(ctx.selfId)
-  if (!entries.length) return [out(`The DNS cache on ${me?.data.label ?? 'this device'} is empty.`)]
-  const lines: Lines = [
-    out(`DNS cache on ${me?.data.label ?? 'this device'}:`),
-    out(`${'Name'.padEnd(30)}${'Type'.padEnd(7)}${'TTL left'.padEnd(10)}Answer`),
-  ]
+function cacheTable(entries: ReturnType<typeof cacheEntries>): Lines {
+  const lines: Lines = [out(`${'Name'.padEnd(30)}${'Type'.padEnd(7)}${'TTL left'.padEnd(10)}Answer`)]
   for (const e of entries) {
     const shown = e.answer.status !== 'NOERROR' ? e.answer.status
       : e.answer.records.length ? e.answer.records.map((r) => (r.type === e.qtype ? rdata(r) : `${rdata(r)} (${r.type})`)).join(', ')
       : 'no record of this type'
     lines.push(out(`${e.name.padEnd(30)}${e.qtype.padEnd(7)}${`${e.remaining} s`.padEnd(10)}${shown}`))
   }
-  lines.push(info('ⓘ Each answer is kept until its TTL runs out, then the device asks its DNS server again. flushdns empties the cache.'))
+  return lines
+}
+
+export function cmdDnsCache(ctx: TermContext): Lines {
+  const me = nodeById(ctx.selfId, ctx.nodes)
+  const label = me?.data.label ?? 'this device'
+  const entries = cacheEntries(ctx.selfId)
+  const lines: Lines = entries.length
+    ? [out(`DNS cache on ${label}:`), ...cacheTable(entries),
+       info('ⓘ Each answer is kept until its TTL runs out, then the device asks its DNS server again. flushdns empties the cache.')]
+    : [out(`The DNS cache on ${label} is empty.`)]
+  if (me?.data.deviceType === 'dns') {
+    // A DNS server also keeps what its forwarder told it, to answer other devices
+    const served = cacheEntries(serverCacheId(ctx.selfId))
+    lines.push(out(''), ...(served.length
+      ? [out(`Answers ${label} got from its forwarder:`), ...cacheTable(served),
+         info('ⓘ The server answers these from its cache until the TTL runs out, without asking its forwarder again.')]
+      : [out(`${label} has no answers from its forwarder cached.`)]))
+  }
   return lines
 }
 
 export function cmdFlushDns(ctx: TermContext, quiet = false): Lines {
   flushDnsCache(ctx.selfId)
-  if (quiet) return []
   const me = nodeById(ctx.selfId, ctx.nodes)
-  return [info(`Flushed the DNS cache on ${me?.data.label ?? 'this device'}. The next lookup asks the DNS server again.`)]
+  const isServer = me?.data.deviceType === 'dns'
+  if (isServer) flushDnsCache(serverCacheId(ctx.selfId))
+  if (quiet) return []
+  return [info(isServer
+    ? `Flushed the DNS caches on ${me!.data.label}: its own, and the answers it got from its forwarder. The next lookup of a name it doesn't hold asks the forwarder again.`
+    : `Flushed the DNS cache on ${me?.data.label ?? 'this device'}. The next lookup asks the DNS server again.`)]
 }
 
 // ── dig +trace (Phase 4 B5) ──────────────────────────────────────────────────

@@ -12,8 +12,11 @@ type Failed = Extract<Route, { ok: false }>
 export type Attempt =
   | { kind: 'tcp'; port: number }
   | { kind: 'icmp' }
-  /** A DNS query (UDP 53): the resolver sends it three times, about 5 s apart, then gives up. */
-  | { kind: 'dns'; name: string; qtype?: DnsRecordType; id?: string }
+  /**
+   * A DNS query (UDP 53): the resolver sends it three times, about 5 s apart, then gives up. A DNS
+   * server asking its forwarder sends it `tries` times and waits `waitMs` for each.
+   */
+  | { kind: 'dns'; name: string; qtype?: DnsRecordType; id?: string; tries?: number; waitMs?: number }
 
 /** How long a resolver waits for a DNS answer before sending the query again (simulation clock, Normal speed). */
 export const DNS_RETRY_MS = 5000
@@ -68,11 +71,11 @@ export function playUnreachable(
     const hop = scaledHop(CONV_HOP_MS)
     const legMs = (route.reach.length - 1) * hop
     const macs = firstHopMacs(route.reach, ctx.nodes)
-    const tries = attempt.kind === 'icmp' ? 4 : 3
+    const tries = attempt.kind === 'icmp' ? 4 : attempt.kind === 'dns' ? attempt.tries ?? 3 : 3
     const clientPort = ephemeralPort()
     const dnsId = attempt.kind === 'dns' ? attempt.id ?? newTransactionId() : ''
     // A resolver waits about 5 s for each answer; TCP and ping retry as soon as the last one has gone
-    const gap = attempt.kind === 'dns' ? Math.max(scaledHop(DNS_RETRY_MS), legMs + hop) : legMs + Math.max(hop, 1)
+    const gap = attempt.kind === 'dns' ? Math.max(scaledHop(attempt.waitMs ?? DNS_RETRY_MS), legMs + hop) : legMs + Math.max(hop, 1)
     let t = startMs
     const tryTimes: number[] = []
     for (let i = 0; i < tries; i++) {

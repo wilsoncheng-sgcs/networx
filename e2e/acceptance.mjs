@@ -1077,6 +1077,42 @@ await scenario(33, 'ISP routes: a public network is reachable only while it is a
   await loadCareConnect()
 })
 
+await scenario(34, 'DNS forwarder: a name the server does not hold is asked upstream', async () => {
+  await loadCareConnect()
+  await selectNode('DNS Server')
+  await openTab('Configure')
+  const field = aside().getByTestId('dns-forwarder')
+  check('the DNS server forwards to 8.8.8.8', (await field.inputValue()) === '8.8.8.8', await field.inputValue())
+  await shot('34a-forwarder-field')
+  await terminalOn('CareConnect Web')
+  await clearTerm(); await clearCapture()
+  await cmd('dig example.com')
+  const o = await output()
+  check('answered, not authoritative', o.includes('93.184.216.34') && o.includes(';; flags: qr rd ra;'))
+  check('the forwarder ⓘ', o.includes('so it asked its forwarder (8.8.8.8) and passed the answer on'))
+  await page.waitForTimeout(300)
+  const dns = (await rowTexts()).map(cols).filter((r) => r.proto === 'DNS')
+  const hops = dns.map((r) => `${r.src.replace(/:\d{5}$/, ':eph')}→${r.dst.replace(/:\d{5}$/, ':eph')}`)
+  check('capture: client → server → 8.8.8.8 → server → client', JSON.stringify(hops) === JSON.stringify([
+    '203.0.113.80:eph→203.0.113.53:53', '203.0.113.53:eph→8.8.8.8:53', '8.8.8.8:53→203.0.113.53:eph', '203.0.113.53:53→203.0.113.80:eph',
+  ]), hops.join(' | '))
+  await shot('34b-forwarded')
+  await clearTerm(); await clearCapture()
+  await cmd('nslookup example.com')
+  await page.waitForTimeout(300)
+  const again = (await rowTexts()).map(cols).filter((r) => r.proto === 'DNS')
+  check('second lookup: from the server\'s cache, no upstream leg', again.length === 2 && !again.some((r) => r.dst === '8.8.8.8:53'), String(again.length))
+  // No forwarder: the server refuses names it doesn't hold
+  await selectNode('DNS Server')
+  await openTab('Configure')
+  await aside().getByTestId('dns-forwarder').fill('')
+  await terminalOn('CareConnect Web')
+  await clearTerm()
+  await cmd('dig www.google.com')
+  check('blank forwarder: REFUSED', (await output()).includes('status: REFUSED'))
+  await loadCareConnect()
+})
+
 await scenario(13, 'Layout at 1280×800 and 1440×900', async () => {
   if (!(await page.getByTestId('capture-drawer').isVisible().catch(() => false))) await page.getByTestId('capture-toggle').click()
   for (const [w, h] of [[1280, 800], [1440, 900]]) {

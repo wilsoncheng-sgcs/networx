@@ -380,6 +380,15 @@ export default function ConfigPanel({ nodeId, onClose }: Props) {
                     <Field label="Alternate DNS Server" value={data.dnsAlternate ?? ''} onChange={(v) => upd({ dnsAlternate: v.trim() })} placeholder="asked if the first doesn't answer" mono />
                   </>
                 )}
+                {isDns && (
+                  <div className="flex flex-col gap-1">
+                    <Field label="Forwarder (upstream DNS)" value={data.dnsForwarder ?? ''} onChange={(v) => upd({ dnsForwarder: v.trim() })} placeholder="blank = no forwarder" mono testId="dns-forwarder" />
+                    <p className="text-xs text-gray-400">
+                      Names this server doesn't hold are asked here (UDP 53), and the answer is cached for its TTL.
+                      Blank: it answers only its own names and refuses the rest (REFUSED).
+                    </p>
+                  </div>
+                )}
                 <div className="flex flex-col gap-1">
                   <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">MAC Address</label>
                   <span className="font-mono text-sm text-gray-600 bg-gray-50 rounded-md px-2.5 py-1.5 border border-gray-100">

@@ -3,10 +3,10 @@ import type { TermContext, Lines } from '../context'
 import { resolveTarget, isResolveError, routeTo, type Resolved } from '../resolve'
 import { errnoText } from '../routing'
 import { playUnreachable } from '../unreachable'
-import { playLookup, playFailedServers } from '../lookup'
+import { playLookup, playFailedServers, dnsLegs, withWait } from '../lookup'
 import { info } from '../context'
 import { isListening, serviceById, type ServiceId } from '../services'
-import { type Leg, type Step, dnsConversation, newConversation, tcpRefused, runConversations } from '../exchange'
+import { type Leg, type Step, newConversation, tcpRefused, runConversations } from '../exchange'
 
 export interface Target {
   r: Resolved
@@ -38,19 +38,18 @@ export function connectTo(
     ]
     return { lines: playLookup(r, ctx, lines).lines }
   }
-  const dnsConv = dnsConversation(r, ctx)
-  // DNS servers that never answered come first; the leg to the alternate waits for them
-  const dnsLeg = dnsConv ? { ...dnsConv, waitMs: playFailedServers(r, ctx) } : null
+  // DNS servers that never answered come first; the legs to the alternate wait for them
+  const dns = withWait(dnsLegs(r, ctx), playFailedServers(r, ctx))
   const route = routeTo(r.node, r.ip, ctx, { protocol: 'TCP', port })
   if (!route.ok || !r.node) {
     // Subnet, gateway or private-address rules stop it: show how far the SYN gets, then why
     const why = route.ok ? 'No route to host' : errnoText(route.failure)
     const lines = [...messages.noRoute(why), ...(!route.ok && route.explain ? [info(route.explain)] : [])]
-    const dns = runConversations(dnsLeg ? [dnsLeg] : [], ctx)
-    if (route.ok) return { lines: [...dns.lines, ...lines.map((l) => ({ ...l, delayMs: dns.endMs }))] }
-    return { lines: [...dns.lines, ...playUnreachable(route, { kind: 'tcp', port }, r.ip, ctx, lines, dns.endMs).lines] }
+    const played = runConversations(dns, ctx)
+    if (route.ok) return { lines: [...played.lines, ...lines.map((l) => ({ ...l, delayMs: played.endMs }))] }
+    return { lines: [...played.lines, ...playUnreachable(route, { kind: 'tcp', port }, r.ip, ctx, lines, played.endMs).lines] }
   }
-  return { r, server: r.node, path: route.path, legs: dnsLeg ? [dnsLeg] : [] }
+  return { r, server: r.node, path: route.path, legs: dns }
 }
 
 export function isFailure(t: Target | Failure): t is Failure {

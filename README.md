@@ -81,6 +81,12 @@ DNS, FTP, SFTP, SSL, TLS, SMTP, POP3, IMAP”* (SE-12-03). It adds:
 - **DNS records** A, AAAA, CNAME, MX, NS and TXT with TTLs, **`dig`** (`@server`, `+short`, `+trace` from the root),
   `nslookup -type=…`, and a **DNS cache** on each device that honours TTL (`dnscache`, `flushdns`); a DNS server
   can be a **secondary** that copies a primary's records
+- **DNS forwarder** on each DNS server (default 8.8.8.8, set in Configure): a name the server doesn't hold, outside
+  its own domains, is really asked upstream. The server's own query (from its ephemeral port to UDP 53) and the reply
+  show in the capture and in step mode before the client gets its non-authoritative answer. The server caches the
+  answer for its TTL, so the next lookup has no upstream leg. If the forwarder can't be reached (no connection, ISP
+  route, firewall), the server answers **SERVFAIL** after 3 s with an ⓘ saying why, while its own names still work;
+  with no forwarder it answers **REFUSED**
 - **DHCP** hands out the router's own address as the default gateway and its own subnet mask; hosts choose
   **Manual** or **Automatic (DHCP)** addressing in Configure
 - **ISP routing table** on the Internet node: a public network behind a router is reachable from the internet only
