@@ -81,20 +81,7 @@ export default function InfoPanel({ onClose }: Props) {
                     </div>
                     <div className="text-xs text-gray-500 mt-0.5 leading-relaxed">{c.summary}</div>
                   </div>
-                  <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                    <span
-                      className={`text-xs px-1.5 py-0.5 rounded font-medium ${
-                        c.level === 'GCSE'
-                          ? 'bg-green-100 text-green-700'
-                          : c.level === 'A Level'
-                          ? 'bg-purple-100 text-purple-700'
-                          : 'bg-blue-100 text-blue-700'
-                      }`}
-                    >
-                      {c.level}
-                    </span>
-                    <ChevronRight size={14} className="text-gray-300 group-hover:text-blue-400 transition-colors" />
-                  </div>
+                  <ChevronRight size={14} className="flex-shrink-0 mt-0.5 text-gray-300 group-hover:text-blue-400 transition-colors" />
                 </div>
               </button>
             ))}
@@ -106,17 +93,6 @@ export default function InfoPanel({ onClose }: Props) {
       ) : (
         <div className="flex-1 overflow-y-auto px-4 py-4">
           <div className="flex items-center gap-2 mb-3 flex-wrap">
-            <span
-              className={`text-xs px-2 py-0.5 rounded font-medium ${
-                concept.level === 'GCSE'
-                  ? 'bg-green-100 text-green-700'
-                  : concept.level === 'A Level'
-                  ? 'bg-purple-100 text-purple-700'
-                  : 'bg-blue-100 text-blue-700'
-              }`}
-            >
-              {concept.level}
-            </span>
             {concept.tags.map((t) => (
               <span key={t} className="text-xs px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded">
                 {t}

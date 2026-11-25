@@ -1,7 +1,6 @@
 export interface Concept {
   id: string
   title: string
-  level: 'GCSE' | 'A Level' | 'Both'
   tags: string[]
   summary: string
   body: string
@@ -11,7 +10,6 @@ export const concepts: Concept[] = [
   {
     id: 'lan-wan',
     title: 'LAN & WAN',
-    level: 'Both',
     tags: ['network types', 'LAN', 'WAN'],
     summary: 'Local Area Networks connect devices in a limited geographic area; Wide Area Networks span large distances.',
     body: `A **Local Area Network (LAN)** connects devices within a building or campus. It typically uses Ethernet cables or Wi-Fi and is owned by a single organisation.
@@ -29,7 +27,6 @@ A **Wide Area Network (WAN)** covers a large geographic area. The Internet is th
   {
     id: 'tcp-ip',
     title: 'TCP/IP Model',
-    level: 'Both',
     tags: ['protocols', 'layers', 'TCP', 'IP'],
     summary: 'TCP/IP is the 4-layer model used to describe how data travels across the internet.',
     body: `The **TCP/IP model** has 4 layers, each responsible for different aspects of communication. Networx names them rather than numbering them, so they don't clash with the 7 OSI layers (OSI's Layer 7 is Application):
@@ -55,7 +52,6 @@ Each layer adds a **header** when sending (encapsulation) and removes it when re
   {
     id: 'protocols',
     title: 'Web protocols and their ports',
-    level: 'Both',
     tags: ['HTTP', 'HTTPS', 'TCP/IP', 'DNS', 'FTP', 'SFTP', 'SSL', 'TLS', 'SMTP', 'POP3', 'IMAP', 'ports'],
     summary: 'Protocols are agreed rules that allow devices to communicate. Servers listen on well-known port numbers.',
     body: `| **Protocol** | **Trans&shy;port** | **Port** | **What it does** | **Encrypt&shy;ed?** |
@@ -81,7 +77,6 @@ Try \`ss\` on a server to see which ports it is listening on, and open the packe
   {
     id: 'ssl-tls',
     title: 'SSL and TLS',
-    level: 'Both',
     tags: ['SSL', 'TLS', 'HTTPS', 'encryption', 'certificate'],
     summary: 'TLS (Transport Layer Security) replaced SSL (Secure Sockets Layer). It encrypts data in transit and authenticates the server.',
     body: `**TLS** (Transport Layer Security) replaced **SSL** (Secure Sockets Layer). SSL 2.0 and 3.0 are prohibited/deprecated as insecure (IETF RFC 6176, RFC 7568).
@@ -104,7 +99,6 @@ Try \`curl -v https://www.careconnect.example\` with the packet capture open.`,
   {
     id: 'tcp-handshake',
     title: 'TCP three-way handshake and ports',
-    level: 'Both',
     tags: ['TCP', 'UDP', 'handshake', 'ports', 'SYN'],
     summary: 'TCP opens a connection with SYN, SYN-ACK, ACK. Each end of a connection has a port number.',
     body: `Before any data, TCP opens a connection with a **three-way handshake**:
@@ -126,7 +120,6 @@ Try \`curl http://www.careconnect.example\` and find SYN, SYN-ACK and ACK in the
   {
     id: 'dns',
     title: 'DNS – Domain Name System',
-    level: 'Both',
     tags: ['DNS', 'IP address', 'domain'],
     summary: 'DNS is the "phone book" of the internet, translating human-readable domain names to IP addresses.',
     body: `When you type **www.example.com** into a browser:
@@ -146,7 +139,6 @@ Try \`nslookup\` in any terminal node to see DNS queries!`,
   {
     id: 'ip-addressing',
     title: 'IP Addressing',
-    level: 'Both',
     tags: ['IP', 'IPv4', 'IPv6', 'subnet', 'DHCP'],
     summary: 'Every device on a network needs a unique IP address to send and receive data.',
     body: `**IPv4** addresses are 32-bit numbers written as four decimal octets: **192.168.1.10**
@@ -167,7 +159,6 @@ Try \`nslookup\` in any terminal node to see DNS queries!`,
   {
     id: 'router',
     title: 'Routers',
-    level: 'Both',
     tags: ['router', 'routing', 'routing table', 'IP'],
     summary: 'Routers forward packets between different networks using IP addresses and routing tables.',
     body: `A **router** connects different networks and directs (routes) traffic between them.
@@ -199,7 +190,6 @@ You can see both by connecting with \`ssh 192.168.1.1\` and running \`ipconfig\`
   {
     id: 'domestic-gateway',
     title: 'Domestic Gateway',
-    level: 'Both',
     tags: ['router', 'gateway', 'home network', 'DHCP', 'NAT', 'Wi-Fi', 'firewall', 'modem'],
     summary: 'Home broadband devices combine a modem, router, switch, wireless access point, and basic firewall in a single unit.',
     body: `A **domestic gateway** (sometimes called a home hub or broadband router) is the single box your ISP provides. It combines five functions that would be separate devices in an enterprise network:
@@ -223,7 +213,6 @@ The gateway also runs a DHCP server that automatically assigns IP addresses, sub
   {
     id: 'modem',
     title: 'Modems',
-    level: 'Both',
     tags: ['modem', 'broadband', 'ADSL', 'fibre', 'physical layer'],
     summary: 'A modem converts digital data from a computer into a signal suitable for transmission over the ISP\'s physical connection, and back again.',
     body: `**Modem** stands for **Mo**dulator–**Dem**odulator. It converts between the digital signals used inside your network and whatever physical signal the ISP's line carries.
@@ -242,7 +231,6 @@ The gateway also runs a DHCP server that automatically assigns IP addresses, sub
   {
     id: 'switch',
     title: 'Switches',
-    level: 'Both',
     tags: ['switch', 'MAC address', 'MAC table', 'VLAN'],
     summary: 'Switches connect devices within a LAN using MAC addresses to forward frames to the correct port.',
     body: `A **switch** operates at the **Link Layer** of the TCP/IP model (OSI layers 1–2) and forwards Ethernet frames based on **MAC addresses**.
@@ -266,7 +254,6 @@ The gateway also runs a DHCP server that automatically assigns IP addresses, sub
   {
     id: 'packet-switching',
     title: 'Packet Switching',
-    level: 'Both',
     tags: ['packet switching', 'circuit switching', 'routing'],
     summary: 'Data is broken into small packets that travel independently across the network.',
     body: `**Packet switching** breaks data into small chunks called **packets**. Each packet:
@@ -289,7 +276,6 @@ The **internet uses packet switching**. TCP ensures packets are reassembled in o
   {
     id: 'network-security',
     title: 'Network Security',
-    level: 'Both',
     tags: ['firewall', 'encryption', 'malware', 'phishing', 'DoS'],
     summary: 'Networks face threats including malware, phishing, DoS attacks, and data interception.',
     body: `**Common threats:**
@@ -312,7 +298,6 @@ The **internet uses packet switching**. TCP ensures packets are reassembled in o
   {
     id: 'topology',
     title: 'Network Topologies',
-    level: 'Both',
     tags: ['topology', 'star', 'mesh', 'bus', 'ring'],
     summary: 'Network topology describes how devices are physically or logically connected.',
     body: `**Star topology**
@@ -342,7 +327,6 @@ The **internet uses packet switching**. TCP ensures packets are reassembled in o
   {
     id: 'wired-wireless',
     title: 'Wired vs Wireless',
-    level: 'Both',
     tags: ['ethernet', 'Wi-Fi', 'wireless', 'cable'],
     summary: 'Wired connections use cables; wireless uses radio waves. Each has trade-offs.',
     body: `**Ethernet (wired):**
@@ -368,7 +352,6 @@ The **internet uses packet switching**. TCP ensures packets are reassembled in o
   {
     id: 'client-server',
     title: 'Client-Server vs P2P',
-    level: 'Both',
     tags: ['client-server', 'peer-to-peer', 'P2P', 'server'],
     summary: 'Client-server has a central server; P2P has equal nodes sharing resources directly.',
     body: `**Client-Server:**
@@ -393,7 +376,6 @@ The **internet uses packet switching**. TCP ensures packets are reassembled in o
   {
     id: 'cloud',
     title: 'Cloud Computing',
-    level: 'Both',
     tags: ['cloud', 'SaaS', 'IaaS', 'PaaS', 'virtualisation'],
     summary: 'Cloud computing provides computing resources over the internet on demand.',
     body: `**Cloud computing** delivers computing resources (servers, storage, software) over the internet.
